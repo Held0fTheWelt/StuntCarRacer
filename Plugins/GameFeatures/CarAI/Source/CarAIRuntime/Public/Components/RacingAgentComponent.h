@@ -125,6 +125,23 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Racing|Ground Ray")
 	float GroundRayMaxDistanceCm = 500.f;
 
+	// --- LIDAR Settings ---
+
+	/** Enable optional LIDAR ring sensor.
+	 *  Appends LidarNumRays values to the observation vector.
+	 *  Requires a freshly initialized neural network — incompatible with
+	 *  models trained without LIDAR. */
+	UPROPERTY(EditAnywhere, Category = "Racing|LIDAR")
+	bool bEnableLidar = false;
+
+	/** Number of evenly spaced horizontal rays in the LIDAR ring (4–32). */
+	UPROPERTY(EditAnywhere, Category = "Racing|LIDAR", meta = (ClampMin = 4, ClampMax = 32, EditCondition = "bEnableLidar"))
+	int32 LidarNumRays = 16;
+
+	/** Max LIDAR ray distance (cm). */
+	UPROPERTY(EditAnywhere, Category = "Racing|LIDAR", meta = (EditCondition = "bEnableLidar"))
+	float LidarMaxDistanceCm = 2000.f;
+
 	// --- IMU Sensor Settings ---
 
 	/** Enable IMU sensor (gravity direction) */
@@ -249,6 +266,9 @@ protected:
 		float MaxDistance,
 		FColor DebugColor = FColor::Red
 	);
+
+	/** Trace evenly spaced horizontal LIDAR ring and populate OutRays. */
+	void BuildLidarObservation(const FVector& Origin, const FVector& Forward, TArray<float>& OutRays);
 
 	/** Update all adaptive ray angles based on last hits */
 	void UpdateAdaptiveRayAngles();

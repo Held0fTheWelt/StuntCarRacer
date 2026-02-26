@@ -354,6 +354,13 @@ FRacingObservation URacingAgentComponent::BuildObservation()
 		Obs.GravityZ = -1.f; // Default: pointing down
 	}
 
+	// ===== Optional LIDAR Ring =====
+
+	if (bEnableLidar)
+	{
+		BuildLidarObservation(Origin, Forward, Obs.LidarRays);
+	}
+
 	// ===== Build Vector =====
 	Obs.BuildVector();
 
@@ -438,6 +445,21 @@ float URacingAgentComponent::TraceFixedRay(
 	}
 
 	return 1.0f;
+}
+
+void URacingAgentComponent::BuildLidarObservation(const FVector& Origin, const FVector& Forward, TArray<float>& OutRays)
+{
+	const int32 N = FMath::Max(4, LidarNumRays);
+	OutRays.SetNumUninitialized(N);
+
+	const float StepDeg = 360.f / N;
+
+	for (int32 i = 0; i < N; ++i)
+	{
+		const FQuat YawRot(FVector::UpVector, FMath::DegreesToRadians(StepDeg * i));
+		const FVector Dir = YawRot.RotateVector(Forward).GetSafeNormal();
+		OutRays[i] = TraceFixedRay(Origin, Dir, LidarMaxDistanceCm, FColor::White);
+	}
 }
 
 void URacingAgentComponent::UpdateAdaptiveRayAngles()
@@ -708,12 +730,17 @@ void URacingAgentComponent::DrawObservationHUD()
 		return;
 	}
 
+	FString LidarLine = bEnableLidar
+		? FString::Printf(TEXT("LIDAR: %d rays | ObsSize: %d\n"), LastObservation.LidarRays.Num(), LastObservation.Vector.Num())
+		: TEXT("");
+
 	FString HUDText = FString::Printf(
 		TEXT("Agent #%d | Gen %d\n")
 		TEXT("Speed: %.2f | YawRate: %.2f\n")
 		TEXT("Rays: F=%.2f L=%.2f R=%.2f L45=%.2f R45=%.2f\n")
 		TEXT("      FUp=%.2f FDown=%.2f Ground=%.2f\n")
 		TEXT("Gravity: [%.2f, %.2f, %.2f]\n")
+		TEXT("%s")
 		TEXT("Steps: %d | Fitness: %.2f"),
 		GenomeID, Generation,
 		LastObservation.SpeedNorm, LastObservation.YawRateNorm,
@@ -721,6 +748,7 @@ void URacingAgentComponent::DrawObservationHUD()
 		LastObservation.RayLeft45, LastObservation.RayRight45,
 		LastObservation.RayForwardUp, LastObservation.RayForwardDown, LastObservation.RayGroundDist,
 		LastObservation.GravityX, LastObservation.GravityY, LastObservation.GravityZ,
+		*LidarLine,
 		EpisodeStepCount, GetEpisodeFitness()
 	);
 

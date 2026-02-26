@@ -143,13 +143,20 @@ struct FRacingObservation
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float GravityZ = -1.f; // Up/Down component (default: -1 = pointing down)
 
-	// ===== Flattened Vector (16D) =====
+	// ===== LIDAR Ring (optional, N values) =====
+
+	/** Evenly spaced horizontal ring rays, normalized [0,1].
+	 *  Empty when bEnableLidar = false on the agent component. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	TArray<float> LidarRays;
+
+	// ===== Flattened Vector =====
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	TArray<float> Vector;
 
-	/** Total observation size */
-	static constexpr int32 OBSERVATION_SIZE = 16;
+	/** Base observation size (without LIDAR). */
+	static constexpr int32 BASE_OBSERVATION_SIZE = 15;
 
 	void BuildVector()
 	{
@@ -173,6 +180,11 @@ struct FRacingObservation
 			GravityY,
 			GravityZ
 		};
+		// Append optional LIDAR ring rays
+		if (LidarRays.Num() > 0)
+		{
+			Vector.Append(LidarRays);
+		}
 	}
 };
 
