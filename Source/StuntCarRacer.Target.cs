@@ -11,6 +11,5 @@ public class StuntCarRacerTarget : TargetRules
 		DefaultBuildSettings = BuildSettingsVersion.V6;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
 		ExtraModuleNames.Add("StuntCarRacer");
-		ExtraModuleNames.Add("MyProject3");
 	}
 }

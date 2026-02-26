@@ -29,15 +29,8 @@ public class AsyncSplineBuilder : ModuleRules
 	public AsyncSplineBuilder(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-        // Force a UE 5.4-compatible standard, newer versions can use C++20
-        if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion <= 4)
-        {
-            CppStandard = CppStandardVersion.Cpp17;
-        }
-        else
-        {
-            CppStandard = CppStandardVersion.Cpp20;
-        }
+
+            //CppStandard = CppStandardVersion.Cpp20;
 
         PublicIncludePaths.AddRange(
 			new string[] {
