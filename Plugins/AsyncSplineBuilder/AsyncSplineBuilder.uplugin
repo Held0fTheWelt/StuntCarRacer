@@ -1,0 +1,35 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "AsyncSplineBuilder",
+	"Description": "Async Spline Builder processes spline meshes in configurable batches, keeping the viewport responsive while you build roads, tracks, pipes and more.",
+	"Category": "Misc",
+	"CreatedBy": "Yves Tanas",
+	"CreatedByURL": "https://www.linkedin.com/in/yves-tanas/",
+	"DocsURL": "Documentation Folder in Plugin Root",
+	"MarketplaceURL": "com.epicgames.launcher://ue/Fab/product/41f15640-e169-490c-9edf-bd3255699043",
+	"SupportURL": "https://www.linkedin.com/in/yves-tanas/",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "AsyncSplineBuilder",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64",
+				"Linux",
+				"Mac"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		}
+	]
+}
