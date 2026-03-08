@@ -321,14 +321,25 @@ class GenomeExporter:
 TRAINING_STATE_FILENAME = "training_state.json"
 
 
+def get_training_state_path(genome_dir: Path) -> Path:
+    """
+    Return the canonical path for training_state.json.
+    Canonical location: genome_dir / training_state.json.
+    All writers, readers, and deleters must use this function — do not construct
+    the path inline from any other directory variable (e.g. checkpoint_dir).
+    Unreal reads from Contract.GenomeDir + TrainingStateFileName; this must match.
+    """
+    return genome_dir / TRAINING_STATE_FILENAME
+
+
 def write_training_state(genome_dir: Path, exported_generation: int) -> None:
     """
-    Write training_state.json to genome_dir after every generation export.
+    Write training_state.json to the canonical location (genome_dir).
     Unreal reads exported_generation from this file to synchronize CurrentGeneration
     before calling LoadGenerationGenomes(). This is the canonical source of truth
     for which generation Python just exported.
     """
-    state_file = genome_dir / TRAINING_STATE_FILENAME
+    state_file = get_training_state_path(genome_dir)
     with open(state_file, "w") as f:
         json.dump({"exported_generation": exported_generation}, f, indent=2)
     print(f"[NEAT] Training state written: {state_file} (exported_generation={exported_generation})")
@@ -450,7 +461,7 @@ def main():
         if best_genome_path_val and Path(best_genome_path_val).is_file():
             Path(best_genome_path_val).unlink()
             print(f"[NEAT] Fresh mode: deleted best genome {best_genome_path_val}")
-        state_file = checkpoint_dir_path / TRAINING_STATE_FILENAME
+        state_file = get_training_state_path(genome_dir_path)
         if state_file.is_file():
             state_file.unlink()
             print(f"[NEAT] Fresh mode: deleted training state {state_file}")
