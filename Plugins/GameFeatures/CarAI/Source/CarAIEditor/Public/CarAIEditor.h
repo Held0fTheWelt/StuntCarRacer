@@ -9,13 +9,19 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
-	/** Menü-Registrierung */
+	/** Register entries under Window > Car AI in the Level Editor menu bar. */
 	void RegisterMenus();
 
-	/** Öffnet das Curriculum-Tool */
+	/** Opens the CarAI Curriculum editor utility widget. */
 	void OpenCurriculum();
 
+	/** Opens the NEAT Training editor utility widget. */
+	void OpenNeatTraining();
+
 private:
-	/** Referenz auf das EditorUtilityWidget-Blueprint */
+	/** Soft reference to the Curriculum EditorUtilityWidget Blueprint asset. */
 	TSoftObjectPtr<class UEditorUtilityWidgetBlueprint> CurriculumWidget;
+
+	/** Soft reference to the NEAT Training EditorUtilityWidget Blueprint asset. */
+	TSoftObjectPtr<class UEditorUtilityWidgetBlueprint> NeatTrainingWidget;
 };

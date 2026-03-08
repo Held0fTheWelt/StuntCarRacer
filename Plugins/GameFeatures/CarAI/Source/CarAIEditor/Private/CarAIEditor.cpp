@@ -1,8 +1,7 @@
-﻿#include "CarAIEditor.h"
+#include "CarAIEditor.h"
 
 #include "Editor.h"
 #include "LevelEditor.h"
-
 #include "ToolMenus.h"
 #include "EditorUtilitySubsystem.h"
 #include "EditorUtilityWidgetBlueprint.h"
@@ -11,12 +10,15 @@
 
 void FCarAIEditor::StartupModule()
 {
-	// Pfad zu deinem EditorUtilityWidget-Blueprint
+	// Soft references resolved at open-time to avoid loading assets at startup.
 	CurriculumWidget = TSoftObjectPtr<UEditorUtilityWidgetBlueprint>(
 		FSoftObjectPath(TEXT("/CarAI/Editor/EUW_AICarCurriculum.EUW_AICarCurriculum"))
 	);
+	NeatTrainingWidget = TSoftObjectPtr<UEditorUtilityWidgetBlueprint>(
+		FSoftObjectPath(TEXT("/CarAI/Editor/EUW_NeatTraining.EUW_NeatTraining"))
+	);
 
-	// Menüs erst registrieren, wenn ToolMenus bereit sind
+	// Register menus after ToolMenus is ready.
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(
 			this, &FCarAIEditor::RegisterMenus
@@ -51,9 +53,15 @@ void FCarAIEditor::RegisterMenus()
 		LOCTEXT("OpenCarAICurriculum", "CarAI Curriculum"),
 		LOCTEXT("OpenCarAICurriculum_Tooltip", "Open the CarAI Curriculum Editor"),
 		FSlateIcon(),
-		FUIAction(
-			FExecuteAction::CreateRaw(this, &FCarAIEditor::OpenCurriculum)
-		)
+		FUIAction(FExecuteAction::CreateRaw(this, &FCarAIEditor::OpenCurriculum))
+	);
+
+	Section.AddMenuEntry(
+		"OpenNeatTraining",
+		LOCTEXT("OpenNeatTraining", "NEAT Training"),
+		LOCTEXT("OpenNeatTraining_Tooltip", "Open the NEAT Training editor utility widget"),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateRaw(this, &FCarAIEditor::OpenNeatTraining))
 	);
 }
 
@@ -66,14 +74,34 @@ void FCarAIEditor::OpenCurriculum()
 
 	if (!CurriculumWidget.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("CarAIEditor: CurriculumWidget not found"));
+		UE_LOG(LogTemp, Error, TEXT("[CarAIEditor] CurriculumWidget not found at /CarAI/Editor/EUW_AICarCurriculum"));
 		return;
 	}
 
-	if (UEditorUtilitySubsystem* Subsystem =
-		GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
+	if (UEditorUtilitySubsystem* Subsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
 	{
 		Subsystem->SpawnAndRegisterTab(CurriculumWidget.Get());
+	}
+}
+
+void FCarAIEditor::OpenNeatTraining()
+{
+	if (!NeatTrainingWidget.IsValid())
+	{
+		NeatTrainingWidget.LoadSynchronous();
+	}
+
+	if (!NeatTrainingWidget.IsValid())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CarAIEditor] EUW_NeatTraining not found at /CarAI/Editor/EUW_NeatTraining. "
+			"Ensure the asset exists and is reparented to UNeatTrainingEditorWidget."));
+		return;
+	}
+
+	if (UEditorUtilitySubsystem* Subsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] Opening NEAT Training editor utility widget"));
+		Subsystem->SpawnAndRegisterTab(NeatTrainingWidget.Get());
 	}
 }
 
