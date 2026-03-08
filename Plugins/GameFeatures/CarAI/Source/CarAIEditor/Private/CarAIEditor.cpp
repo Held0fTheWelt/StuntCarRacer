@@ -1,12 +1,21 @@
 #include "CarAIEditor.h"
+#include "UI/NeatTrainingEditorWidget.h"
 
 #include "Editor.h"
 #include "LevelEditor.h"
 #include "ToolMenus.h"
 #include "EditorUtilitySubsystem.h"
 #include "EditorUtilityWidgetBlueprint.h"
+#include "Modules/ModuleManager.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
 
 #define LOCTEXT_NAMESPACE "CarAIEditor"
+
+FCarAIEditor& FCarAIEditor::Get()
+{
+	return FModuleManager::LoadModuleChecked<FCarAIEditor>("CarAIEditor");
+}
 
 void FCarAIEditor::StartupModule()
 {
@@ -18,6 +27,10 @@ void FCarAIEditor::StartupModule()
 		FSoftObjectPath(TEXT("/CarAI/Editor/EUW_NeatTraining.EUW_NeatTraining"))
 	);
 
+	// PIE lifecycle: bind once; unbind in ShutdownModule to avoid duplicate binding and leaks.
+	PostPIEStartedHandle = FEditorDelegates::PostPIEStarted.AddRaw(this, &FCarAIEditor::OnPostPIEStarted);
+	EndPIEHandle = FEditorDelegates::EndPIE.AddRaw(this, &FCarAIEditor::OnEndPIE);
+
 	// Register menus after ToolMenus is ready.
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(
@@ -28,9 +41,74 @@ void FCarAIEditor::StartupModule()
 
 void FCarAIEditor::ShutdownModule()
 {
+	FEditorDelegates::PostPIEStarted.Remove(PostPIEStartedHandle);
+	FEditorDelegates::EndPIE.Remove(EndPIEHandle);
+	PostPIEStartedHandle.Reset();
+	EndPIEHandle.Reset();
+	RegisteredNeatWidget.Reset();
+
 	if (UToolMenus::Get())
 	{
 		UToolMenus::UnregisterOwner(this);
+	}
+}
+
+void FCarAIEditor::RegisterNeatTrainingWidget(UNeatTrainingEditorWidget* Widget)
+{
+	if (Widget)
+	{
+		RegisteredNeatWidget = Widget;
+		UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] NEAT training widget registered for PIE lifecycle"));
+	}
+}
+
+void FCarAIEditor::UnregisterNeatTrainingWidget(UNeatTrainingEditorWidget* Widget)
+{
+	if (RegisteredNeatWidget.Get() == Widget)
+	{
+		RegisteredNeatWidget.Reset();
+		UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] NEAT training widget unregistered"));
+	}
+}
+
+void FCarAIEditor::OnPostPIEStarted(bool bSimulate)
+{
+	UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] PIE started (simulate=%d)"), bSimulate ? 1 : 0);
+
+	UWorld* PIEWorld = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::PIE && Context.World())
+			{
+				PIEWorld = Context.World();
+				break;
+			}
+		}
+	}
+
+	if (PIEWorld)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] PIE world resolved: %s"), *PIEWorld->GetName());
+	}
+
+	if (UNeatTrainingEditorWidget* Widget = RegisteredNeatWidget.Get())
+	{
+		if (Widget->bArmedForPIE)
+		{
+			Widget->OnPIEWorldStarted(PIEWorld);
+		}
+	}
+}
+
+void FCarAIEditor::OnEndPIE(bool bSimulate)
+{
+	UE_LOG(LogTemp, Log, TEXT("[CarAIEditor] PIE ended (simulate=%d)"), bSimulate ? 1 : 0);
+
+	if (UNeatTrainingEditorWidget* Widget = RegisteredNeatWidget.Get())
+	{
+		Widget->OnPIEEnded();
 	}
 }
 

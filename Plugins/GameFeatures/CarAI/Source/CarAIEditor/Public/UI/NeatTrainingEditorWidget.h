@@ -162,6 +162,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	FString GetWorkflowStateDescription() const;
 
+	/** Called by CarAIEditor module when PIE has started. Advances workflow to WaitingForPIEWorld / WaitingForRuntimeAgents. */
+	void OnPIEWorldStarted(class UWorld* PIEWorld);
+	/** Called by CarAIEditor module when PIE has ended. Cancels deferred flow, clears stale refs, transitions to PIEEnded. */
+	void OnPIEEnded();
+
+protected:
+	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
+
 private:
 	/** The NEAT training manager owned by this widget for the duration of the editor session. */
 	UPROPERTY()
@@ -175,4 +184,8 @@ private:
 
 	/** Return PIE world if active, otherwise the editor world. Used for agent discovery. */
 	UWorld* GetEditorOrPIEWorld() const;
+
+private:
+	/** Cached PIE world when armed flow is waiting for agents. Cleared on PIE end. */
+	TWeakObjectPtr<UWorld> CachedPIEWorld;
 };

@@ -1,4 +1,5 @@
 #include "UI/NeatTrainingEditorWidget.h"
+#include "CarAIEditor.h"
 #include "Manager/NEATTrainingManager.h"
 #include "Components/RacingAgentComponent.h"
 
@@ -116,6 +117,51 @@ void UNeatTrainingEditorWidget::ArmTraining()
 	bArmedForPIE = true;
 	SetWorkflowState(ENeatTrainingWorkflowState::ArmedForPIE);
 	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Training armed for PIE. Start PIE to continue automatically."));
+}
+
+void UNeatTrainingEditorWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	FCarAIEditor::Get().RegisterNeatTrainingWidget(this);
+}
+
+void UNeatTrainingEditorWidget::NativeDestruct()
+{
+	FCarAIEditor::Get().UnregisterNeatTrainingWidget(this);
+	CachedPIEWorld.Reset();
+	Super::NativeDestruct();
+}
+
+void UNeatTrainingEditorWidget::OnPIEWorldStarted(UWorld* PIEWorld)
+{
+	if (!bArmedForPIE)
+	{
+		return;
+	}
+	SetWorkflowState(ENeatTrainingWorkflowState::WaitingForPIEWorld);
+	CachedPIEWorld = PIEWorld;
+	if (PIEWorld)
+	{
+		SetWorkflowState(ENeatTrainingWorkflowState::WaitingForRuntimeAgents);
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE world captured; deferred flow waiting for runtime agents."));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NeatTrainingEditorWidget] PIE started but world not resolved; staying in WaitingForPIEWorld."));
+	}
+}
+
+void UNeatTrainingEditorWidget::OnPIEEnded()
+{
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE ended; deferred training request cancelled, clearing stale references."));
+	CachedPIEWorld.Reset();
+	if (TrainingManager && IsValid(TrainingManager))
+	{
+		TrainingManager->UnregisterAllAgents();
+	}
+	RegisteredAgentCount = 0;
+	bArmedForPIE = false;
+	SetWorkflowState(ENeatTrainingWorkflowState::PIEEnded);
 }
 
 // ============================================================================
