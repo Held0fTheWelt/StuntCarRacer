@@ -131,6 +131,9 @@ void UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
 
 	Agents.Add(Agent);
 	Agent->OnEpisodeDone.AddDynamic(this, &UNEATTrainingManager::OnAgentEpisodeDone);
+	// Ensure registered agents are unassigned (no genome/backend) until AssignGenomesToAgents runs.
+	Agent->GenomeID = -1;
+	Agent->SetPolicyBackend(nullptr);
 
 	// Registration is passive: store agent, bind events, do NOT activate or start stepping.
 	// Evaluation starts only when genomes are loaded and StartEpisodeEvaluation() runs.
