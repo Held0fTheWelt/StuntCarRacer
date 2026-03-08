@@ -52,13 +52,15 @@ struct FNEATTrainingContract
  * NEAT Training Manager
  *
  * Coordinates NEAT evolution training cycle:
- * 1. Spawn agents with genomes from Python
- * 2. Evaluate fitness (let agents run episodes)
- * 3. Export fitness back to Python
- * 4. Wait for Python to evolve next generation
- * 5. Load new genomes and repeat
+ * 1. Load genomes from Python (generation_N_genomes.json + genome_*.json)
+ * 2. Evaluate fitness in batches when population size > agent count (each genome evaluated exactly once)
+ * 3. Export fitness only after all genomes in the generation have fitness (no partial export)
+ * 4. Trigger Python to evolve next generation
+ * 5. Repeat
  *
- * Path configuration is the single source of truth; Python receives a manifest JSON.
+ * Generation evaluation: Loaded genome count must equal PopulationSize (fail fast otherwise).
+ * Batch mode: genomes are assigned in waves to agents until all are evaluated; pending/active/completed
+ * are tracked via CurrentBatchStartIndex, NumAgentsInCurrentBatch, GenomeFitnessMap.
  */
 UCLASS(BlueprintType)
 class CARAIEDITOR_API UNEATTrainingManager : public UObject
@@ -206,6 +208,9 @@ protected:
 
 	/** Log concise NEAT status: generation, active/completed genomes, last exported fitness file, etc. */
 	void LogNEATStatusSummary(const TCHAR* Phase) const;
+
+	/** Log generation evaluation progress: completed count, total, current batch size. Call at batch start and when batch completes. */
+	void LogGenerationEvaluationProgress(const TCHAR* Phase) const;
 
 private:
 	UPROPERTY() ENEATTrainingState TrainingState = ENEATTrainingState::Idle;

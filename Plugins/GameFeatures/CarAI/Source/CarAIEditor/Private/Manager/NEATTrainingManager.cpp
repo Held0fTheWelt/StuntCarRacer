@@ -311,10 +311,18 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome loaded: %s (genome_id=%d, inputs=%d outputs=%d)"), *GenomePath, GenomeID, LoadedGenome.NumInputs, LoadedGenome.NumOutputs);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated); ready for AssignGenomesToAgents"),
-		CurrentGenomes.Num(), CurrentGeneration);
+	const int32 LoadedCount = CurrentGenomes.Num();
+	if (LoadedCount != PopulationSize)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d: loaded genome count %d does not match PopulationSize %d. Every genome must be evaluated; aborting to avoid invalid evolution."),
+			CurrentGeneration, LoadedCount, PopulationSize);
+		return false;
+	}
 
-	return CurrentGenomes.Num() > 0;
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated, count matches PopulationSize); ready for batch evaluation"),
+		LoadedCount, CurrentGeneration);
+
+	return true;
 }
 
 bool UNEATTrainingManager::LoadGenomeFromJSON(const FString& FilePath, FNEATGenomeData& OutGenome)
@@ -350,8 +358,9 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 	const int32 BatchEnd = CurrentBatchStartIndex + NumAgentsInCurrentBatch;
 	const int32 TotalBatches = (NumGenomes + NumAgents - 1) / NumAgents;
 	const int32 CurrentBatchIndex = (NumGenomes <= NumAgents) ? 0 : (CurrentBatchStartIndex / NumAgents);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch progress: evaluating genomes [%d..%d) of %d (batch %d/%d)"),
-		CurrentBatchStartIndex, BatchEnd, NumGenomes, CurrentBatchIndex + 1, TotalBatches);
+	LogGenerationEvaluationProgress(TEXT("batch_start"));
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch %d/%d: evaluating genomes [%d..%d) of %d"),
+		CurrentBatchIndex + 1, TotalBatches, CurrentBatchStartIndex, BatchEnd, NumGenomes);
 
 	int32 AssignedCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
@@ -433,15 +442,15 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 
 		if (bGenerationComplete)
 		{
-			// All genomes in this generation evaluated; export only once
+			LogGenerationEvaluationProgress(TEXT("batch_done"));
 			if (!IsGenerationFullyEvaluated())
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d: fitness map has %d entries but %d genomes; missing genome IDs. Aborting export."),
+				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d: fitness map has %d entries but %d genomes; missing genome IDs. No genome may be silently skipped. Aborting export and stopping training."),
 					CurrentGeneration, GenomeFitnessMap.Num(), CurrentGenomes.Num());
 				StopTraining();
 				return;
 			}
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation %d complete: all %d genomes evaluated."), CurrentGeneration, CurrentGenomes.Num());
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation %d evaluation complete: all %d genomes evaluated; exporting fitness."), CurrentGeneration, CurrentGenomes.Num());
 
 			ExportFitnessValues();
 			CurrentGeneration++;
@@ -461,9 +470,8 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		}
 		else
 		{
-			// Next batch: more genomes to evaluate
 			CurrentBatchStartIndex += NumAgentsInCurrentBatch;
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting next batch: genome index from %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch complete; starting next batch: genome index from %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
 			AssignGenomesToAgents();
 			StartEpisodeEvaluation();
 		}
@@ -492,9 +500,10 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		const bool bGenerationComplete = (CurrentBatchStartIndex + NumAgentsInCurrentBatch >= CurrentGenomes.Num());
 		if (bGenerationComplete)
 		{
+			LogGenerationEvaluationProgress(TEXT("timeout_batch_done"));
 			if (!IsGenerationFullyEvaluated())
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d (timeout): fitness map incomplete (%d/%d). Aborting export."),
+				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d (timeout): fitness map incomplete (%d/%d). No genome may be silently skipped. Aborting export and stopping training."),
 					CurrentGeneration, GenomeFitnessMap.Num(), CurrentGenomes.Num());
 				StopTraining();
 				return;
@@ -517,6 +526,7 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		else
 		{
 			CurrentBatchStartIndex += NumAgentsInCurrentBatch;
+			LogGenerationEvaluationProgress(TEXT("timeout_next_batch"));
 			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Timeout: starting next batch from genome index %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
 			AssignGenomesToAgents();
 			StartEpisodeEvaluation();
@@ -557,8 +567,17 @@ void UNEATTrainingManager::LogNEATStatusSummary(const TCHAR* Phase) const
 {
 	const FString ExportedFile = LastExportedFitnessFilePath.IsEmpty() ? TEXT("(none)") : LastExportedFitnessFilePath;
 	const FString BestGenomeFile = LastLoadedBestGenomePath.IsEmpty() ? TEXT("(none)") : LastLoadedBestGenomePath;
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT status [%s]: generation=%d, active_genomes=%d, completed_genomes=%d, exported_fitness_file=%s, loaded_best_genome=%s"),
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT status [%s]: generation=%d, total_genomes=%d, completed_fitness=%d, exported_fitness_file=%s, loaded_best_genome=%s"),
 		Phase, CurrentGeneration, CurrentGenomes.Num(), GenomeFitnessMap.Num(), *ExportedFile, *BestGenomeFile);
+}
+
+void UNEATTrainingManager::LogGenerationEvaluationProgress(const TCHAR* Phase) const
+{
+	const int32 Total = CurrentGenomes.Num();
+	const int32 Completed = GenomeFitnessMap.Num();
+	const int32 Pending = Total - Completed;
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation evaluation progress [%s]: completed=%d total=%d pending=%d current_batch_agents=%d"),
+		Phase, Completed, Total, Pending, NumAgentsInCurrentBatch);
 }
 
 void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
