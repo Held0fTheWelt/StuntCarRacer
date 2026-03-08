@@ -32,6 +32,7 @@ struct FNEATTrainingContract
 	FString BestGenomePath;
 	int32 ObservationSize = 15;  // Must match FRacingObservation (base without LIDAR)
 	int32 ActionSize = 3;         // Steer, Throttle, Brake
+	int32 PopulationSize = 50;   // Must match Python neat_config pop_size; single source of truth via manifest
 
 	/** File naming: fitness export */
 	static inline const TCHAR* FitnessFileNameFormat = TEXT("generation_%d.json");
@@ -137,11 +138,16 @@ public:
 
 	// ===== Agent Management =====
 
+	/** Register an agent. Returns true if newly added, false if null or already registered. */
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
-	void RegisterAgent(URacingAgentComponent* Agent);
+	bool RegisterAgent(URacingAgentComponent* Agent);
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	void UnregisterAgent(URacingAgentComponent* Agent);
+
+	/** True if the given component is already in the registered agents list. */
+	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
+	bool IsAgentRegistered(URacingAgentComponent* Agent) const;
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	void UnregisterAllAgents();
@@ -156,6 +162,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	int32 GetCurrentGeneration() const { return CurrentGeneration; }
+
+	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
+	int32 GetRegisteredAgentCount() const { return Agents.Num(); }
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	bool IsTraining() const { return TrainingState == ENEATTrainingState::Evaluating; }

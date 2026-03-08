@@ -36,7 +36,7 @@ from typing import Dict, List, Tuple, Optional
 # ============================================================================
 
 CONFIG_FILE = "neat_config.txt"
-REQUIRED_CONTRACT_KEYS = ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size")
+REQUIRED_CONTRACT_KEYS = ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size", "population_size")
 
 # Canonical NEAT observation size and layout (must match Unreal FRacingObservation::NEAT_OBSERVATION_SIZE and BuildVectorForNEAT order).
 # LIDAR and other optional sensors are not part of the NEAT contract.
@@ -51,12 +51,12 @@ NEAT_OBSERVATION_LAYOUT = (
 # NEAT Config Template
 # ============================================================================
 
-def _config_template(obs_size: int, action_size: int) -> str:
+def _config_template(obs_size: int, action_size: int, pop_size: int) -> str:
     return """
 [NEAT]
 fitness_criterion     = max
 fitness_threshold     = 1000.0
-pop_size              = 50
+pop_size              = {pop_size}
 reset_on_extinction   = False
 
 [DefaultGenome]
@@ -132,7 +132,7 @@ species_elitism      = 2
 [DefaultReproduction]
 elitism            = 2
 survival_threshold = 0.2
-""".format(obs_size=obs_size, action_size=action_size)
+""".format(obs_size=obs_size, action_size=action_size, pop_size=pop_size)
 
 # ============================================================================
 # Checkpoint (deterministic filename; one file per contract dir; enables resume)
@@ -403,17 +403,36 @@ def log_resolved_contract(contract: dict) -> None:
     print(f"[NEAT contract]   genome_dir={contract['genome_dir']}")
     print(f"[NEAT contract]   checkpoint_dir={contract['checkpoint_dir']}")
     print(f"[NEAT contract]   best_genome_path={contract['best_genome_path']}")
-    print(f"[NEAT contract]   observation_size={contract['observation_size']} action_size={contract['action_size']}")
+    print(f"[NEAT contract]   observation_size={contract['observation_size']} action_size={contract['action_size']} population_size={contract['population_size']}")
     print(f"[NEAT contract] NEAT observation schema: size={NEAT_OBSERVATION_SIZE} layout={NEAT_OBSERVATION_LAYOUT} (LIDAR not used)")
+    print(f"[NEAT contract] Population parity: manifest population_size={contract['population_size']} -> neat_config pop_size")
     print("[NEAT contract] --- end contract ---")
 
 
-def create_default_config(config_path: str, obs_size: int, action_size: int):
-    """Create default NEAT config file if it doesn't exist."""
-    if not Path(config_path).exists():
-        print(f"📝 Creating default config: {config_path}")
-        with open(config_path, "w") as f:
-            f.write(_config_template(obs_size, action_size))
+def create_or_validate_config(config_path: str, obs_size: int, action_size: int, population_size: int) -> None:
+    """
+    Write NEAT config from manifest (population parity). If file exists and pop_size differs, overwrite with manifest value.
+    Single source of truth: manifest population_size must match neat_config.txt pop_size.
+    """
+    path = Path(config_path)
+    content = _config_template(obs_size, action_size, population_size)
+    if path.exists():
+        with open(path, "r") as f:
+            existing = f.read()
+        if f"pop_size              = {population_size}" not in existing and f"pop_size={population_size}" not in existing:
+            import re
+            match = re.search(r"pop_size\s*=\s*(\d+)", existing)
+            if match:
+                existing_pop = int(match.group(1))
+                if existing_pop != population_size:
+                    print(f"[NEAT] Population parity: overwriting neat_config.txt pop_size {existing_pop} -> {population_size} (manifest)")
+            else:
+                print(f"[NEAT] Population parity: writing neat_config.txt with pop_size={population_size} (manifest)")
+    else:
+        print(f"[NEAT] Creating neat_config.txt with pop_size={population_size} (manifest)")
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"[NEAT] Config population parity: pop_size={population_size} (source: manifest)")
 
 
 def main():
@@ -429,12 +448,13 @@ def main():
     checkpoint_dir = contract["checkpoint_dir"]
     obs_size = int(contract["observation_size"])
     action_size = int(contract["action_size"])
+    population_size = int(contract["population_size"])
     genome_dir_path = Path(genome_dir)
     checkpoint_dir_path = Path(checkpoint_dir)
 
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / CONFIG_FILE
-    create_default_config(str(config_path), obs_size, action_size)
+    create_or_validate_config(str(config_path), obs_size, action_size, population_size)
     config = neat.Config(
         neat.DefaultGenome,
         neat.DefaultReproduction,

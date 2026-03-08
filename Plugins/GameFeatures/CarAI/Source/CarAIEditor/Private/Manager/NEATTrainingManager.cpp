@@ -220,6 +220,7 @@ FNEATTrainingContract UNEATTrainingManager::GetResolvedContract() const
 			ObservationSize, FRacingObservation::NEAT_OBSERVATION_SIZE);
 	}
 	C.ActionSize = ActionSize;
+	C.PopulationSize = PopulationSize;
 	return C;
 }
 
@@ -244,9 +245,12 @@ FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract&
 	Root->SetStringField(TEXT("best_genome_path"), Contract.BestGenomePath);
 	Root->SetNumberField(TEXT("observation_size"), Contract.ObservationSize);
 	Root->SetNumberField(TEXT("action_size"), Contract.ActionSize);
+	Root->SetNumberField(TEXT("population_size"), Contract.PopulationSize);
 	// training_mode: "fresh" forces Python to discard checkpoint/best-genome before running;
 	// "resume" loads the latest checkpoint (default). Set bFreshStart on this manager to control.
 	Root->SetStringField(TEXT("training_mode"), bFreshStart ? TEXT("fresh") : TEXT("resume"));
+
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Contract population parity: manifest population_size=%d (source: manager)."), Contract.PopulationSize);
 
 	FString JsonString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
