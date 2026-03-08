@@ -185,7 +185,18 @@ private:
 	/** Return PIE world if active, otherwise the editor world. Used for agent discovery. */
 	UWorld* GetEditorOrPIEWorld() const;
 
+	/** Poll for URacingAgentComponent in CachedPIEWorld; register when found or fail after max duration. Called by discovery timer. */
+	void PollForRuntimeAgents();
+
 private:
 	/** Cached PIE world when armed flow is waiting for agents. Cleared on PIE end. */
 	TWeakObjectPtr<UWorld> CachedPIEWorld;
+
+	/** Timer for deferred runtime-agent discovery. Uses editor world timer manager. */
+	FTimerHandle AgentDiscoveryTimerHandle;
+	/** When discovery started (seconds, FPlatformTime::Seconds()). Used to enforce max wait. */
+	double AgentDiscoveryStartTime = 0.0;
+
+	static constexpr float AgentDiscoveryIntervalSeconds = 0.5f;
+	static constexpr float AgentDiscoveryMaxDurationSeconds = 30.0f;
 };

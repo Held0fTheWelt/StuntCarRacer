@@ -8,6 +8,8 @@
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
+#include "HAL/PlatformTime.h"
+#include "TimerManager.h"
 
 // ============================================================================
 // Workflow State
@@ -143,7 +145,28 @@ void UNeatTrainingEditorWidget::OnPIEWorldStarted(UWorld* PIEWorld)
 	if (PIEWorld)
 	{
 		SetWorkflowState(ENeatTrainingWorkflowState::WaitingForRuntimeAgents);
-		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE world captured; deferred flow waiting for runtime agents."));
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE world captured; polling for runtime agents (interval=%.1fs, max=%.0fs)."),
+			AgentDiscoveryIntervalSeconds, AgentDiscoveryMaxDurationSeconds);
+
+		// Use editor world timer so polling runs regardless of PIE world tick.
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (EditorWorld)
+		{
+			AgentDiscoveryStartTime = FPlatformTime::Seconds();
+			EditorWorld->GetTimerManager().SetTimer(
+				AgentDiscoveryTimerHandle,
+				this,
+				&UNeatTrainingEditorWidget::PollForRuntimeAgents,
+				AgentDiscoveryIntervalSeconds,
+				true
+			);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NeatTrainingEditorWidget] No editor world for discovery timer; cannot poll for agents."));
+			SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
+			LastStatusMessage = TEXT("ERROR: No editor world for agent discovery timer.");
+		}
 	}
 	else
 	{
@@ -151,9 +174,86 @@ void UNeatTrainingEditorWidget::OnPIEWorldStarted(UWorld* PIEWorld)
 	}
 }
 
+void UNeatTrainingEditorWidget::PollForRuntimeAgents()
+{
+	UWorld* World = CachedPIEWorld.Get();
+	if (!World || !IsValid(World))
+	{
+		return;
+	}
+	if (!TrainingManager || !IsValid(TrainingManager))
+	{
+		return;
+	}
+
+	const double Elapsed = FPlatformTime::Seconds() - AgentDiscoveryStartTime;
+	if (Elapsed >= AgentDiscoveryMaxDurationSeconds)
+	{
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (EditorWorld)
+		{
+			EditorWorld->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+		}
+		AgentDiscoveryTimerHandle.Invalidate();
+		UE_LOG(LogTemp, Error, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery TIMEOUT after %.0fs. No URacingAgentComponent found in PIE world. Ensure the GameFeature adds agents to the level."),
+			AgentDiscoveryMaxDurationSeconds);
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
+		LastStatusMessage = TEXT("Timeout: no runtime agents found. Ensure GameFeature adds RacingAgentComponent.");
+		return;
+	}
+
+	int32 Count = 0;
+	TArray<URacingAgentComponent*> Found;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		TArray<URacingAgentComponent*> AgentComps;
+		(*It)->GetComponents<URacingAgentComponent>(AgentComps);
+		for (URacingAgentComponent* Comp : AgentComps)
+		{
+			if (Comp && IsValid(Comp))
+			{
+				Found.Add(Comp);
+				Count++;
+			}
+		}
+	}
+
+	if (Count == 0)
+	{
+		return;
+	}
+
+	// Found agents: register once and stop polling.
+	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (EditorWorld)
+	{
+		EditorWorld->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+	}
+	AgentDiscoveryTimerHandle.Invalidate();
+
+	TrainingManager->UnregisterAllAgents();
+	for (URacingAgentComponent* Comp : Found)
+	{
+		if (Comp && IsValid(Comp))
+		{
+			TrainingManager->RegisterAgent(Comp);
+		}
+	}
+	RegisteredAgentCount = Found.Num();
+	SetWorkflowState(ENeatTrainingWorkflowState::AgentsRegistered);
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery: found and registered %d agent(s) in PIE world '%s'."),
+		RegisteredAgentCount, *World->GetName());
+}
+
 void UNeatTrainingEditorWidget::OnPIEEnded()
 {
 	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE ended; deferred training request cancelled, clearing stale references."));
+	// Clear discovery timer so no more polls run.
+	if (GEditor && GEditor->GetEditorWorldContext().World())
+	{
+		GEditor->GetEditorWorldContext().World()->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+	}
+	AgentDiscoveryTimerHandle.Invalidate();
 	CachedPIEWorld.Reset();
 	if (TrainingManager && IsValid(TrainingManager))
 	{
