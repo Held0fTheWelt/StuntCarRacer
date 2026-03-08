@@ -716,7 +716,8 @@ FRewardBreakdown URacingAgentComponent::ComputeReward(const FRacingObservation& 
 
 	// ===== Survival Bonus =====
 
-	R.Survival = EpisodeTimeAccum * RewardCfg.W_Survival;
+	// Per-step survival bonus (DeltaTime keeps it scale-consistent regardless of episode length)
+	R.Survival = DeltaTime * RewardCfg.W_Survival;
 
 	// ===== Speed Bonus (Phase 2, after enough progress) =====
 
@@ -836,6 +837,21 @@ void URacingAgentComponent::FinalizeEpisodeStats(const FString& TerminationReaso
 	}
 
 	EpisodeStats.CalculateNEATFitness();
+
+	// Fitness breakdown log (for debugging and regression verification)
+	{
+		const float ProgressM = EpisodeStats.DistanceTraveledCm / 100.f;
+		float SpeedBonusEstimate = 0.f;
+		if (ProgressM > 50.f && EpisodeStats.DurationSeconds > 0.f)
+		{
+			const float ProgressKmh = (EpisodeStats.DistanceTraveledCm / EpisodeStats.DurationSeconds / 100.f) * 3.6f;
+			SpeedBonusEstimate = ProgressKmh * 0.1f;
+		}
+		const float ScaleFactor = (EpisodeStats.DurationSeconds < 2.0f) ? 0.5f : 1.0f;
+		UE_LOG(LogTemp, Log, TEXT("[%s] Fitness breakdown: NEATFitness=%.2f progress_m=%.1f speed_bonus_est=%.2f scale=%.1f duration=%.1fs termination=%s"),
+			*GetAgentLogId(), EpisodeStats.NEATFitness, ProgressM, SpeedBonusEstimate * ScaleFactor,
+			ScaleFactor, EpisodeStats.DurationSeconds, *EpisodeStats.TerminationReason);
+	}
 }
 
 // ============================================================================
