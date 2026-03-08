@@ -846,6 +846,24 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 		CurrentGeneration = ExportedGen;
 	}
 
+	// Hard validate that the genome list file matches the synchronized generation.
+	// This confirms training_state.json and the actual genome export files agree before
+	// committing to LoadGenerationGenomes(). Prevents silent load of wrong generation.
+	{
+		const FNEATTrainingContract Contract = GetResolvedContract();
+		const FString ExpectedGenomeList = FPaths::Combine(Contract.GenomeDir,
+			FString::Printf(TEXT("generation_%d_genomes.json"), CurrentGeneration));
+		if (!FPaths::FileExists(ExpectedGenomeList))
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json says exported_generation=%d but genome list not found: %s. Python export may be incomplete or paths mismatched."),
+				CurrentGeneration, *ExpectedGenomeList);
+			StopTraining();
+			return;
+		}
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Import handshake confirmed: training_state exported_generation=%d, genome list exists -> loading generation %d"),
+			CurrentGeneration, CurrentGeneration);
+	}
+
 	// Load new genomes (validation: missing files, observation/action size, activation)
 	if (!LoadGenerationGenomes())
 	{
