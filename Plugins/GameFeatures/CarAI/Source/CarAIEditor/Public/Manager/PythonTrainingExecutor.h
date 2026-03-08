@@ -20,9 +20,14 @@ class CARAIEDITOR_API UPythonTrainingExecutor : public UObject
 public:
 	UPythonTrainingExecutor();
 
-	/** Runs Python training script and waits for completion */
+	/**
+	 * Runs Python training script synchronously (blocks game thread until complete).
+	 * ManifestPath must be the neat_contract.json path written by NEATTrainingManager (source of truth for Python).
+	 * Prefer ExecuteTrainingAsync for training; this path is provided for completeness but blocks the game thread.
+	 * Python receives --manifest <ManifestPath> on the command line.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
-	bool ExecuteTraining(const FString& PythonScriptPath, const FString& PythonExecutablePath = TEXT("python"));
+	bool ExecuteTraining(const FString& PythonScriptPath, const FString& ManifestPath, const FString& PythonExecutablePath = TEXT("python"));
 
 	/** Runs Python training script asynchron. ManifestPath must be the neat_contract.json path written by NEATTrainingManager (source of truth for Python). */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")

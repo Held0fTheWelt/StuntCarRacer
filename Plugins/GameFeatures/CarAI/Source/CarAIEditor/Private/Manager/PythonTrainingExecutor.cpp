@@ -61,11 +61,23 @@ FString UPythonTrainingExecutor::FindPythonExecutable(const FString& ExecutableN
 	return ExecutableName;
 }
 
-bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, const FString& PythonExecutablePath)
+bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, const FString& ManifestPath, const FString& PythonExecutablePath)
 {
 	if (bTrainingInProgress)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training already in progress"));
+		return false;
+	}
+
+	// Manifest is required for the NEAT contract; fail fast if missing or file not found
+	if (ManifestPath.IsEmpty())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] ExecuteTraining requires a manifest path (NEAT contract). Pass the neat_contract.json path written by NEATTrainingManager. For async execution use ExecuteTrainingAsync."));
+		return false;
+	}
+	if (!FPaths::FileExists(ManifestPath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Manifest file not found: %s"), *ManifestPath);
 		return false;
 	}
 
@@ -77,8 +89,10 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 	}
 
 	FString PythonExe = FindPythonExecutable(PythonExecutablePath);
-	FString CommandLine = FString::Printf(TEXT("\"%s\""), *ScriptPath);
-	UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Starting training: %s %s"), *PythonExe, *CommandLine);
+	// Pass manifest via --manifest flag so Python uses the Unreal contract as source of truth
+	FString CommandLine = FString::Printf(TEXT("\"%s\" --manifest \"%s\""), *ScriptPath, *ManifestPath);
+	UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Starting training (sync): %s %s"), *PythonExe, *CommandLine);
+	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] ExecuteTraining runs synchronously and blocks the game thread. Prefer ExecuteTrainingAsync for training sessions."));
 
 	bTrainingInProgress = true;
 	LastOutput = TEXT("");
