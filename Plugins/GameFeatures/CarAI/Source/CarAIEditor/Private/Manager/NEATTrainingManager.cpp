@@ -399,20 +399,40 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] AssignGenomesToAgents: %d agents assigned genomes for this batch (genomes %d..%d)"), AssignedCount, CurrentBatchStartIndex, BatchEnd - 1);
+
+	// Deactivate agents outside the active batch so they cannot fire episode-done events
+	const int32 TotalAgents = Agents.Num();
+	int32 DeactivatedCount = 0;
+	for (int32 i = NumAgentsInCurrentBatch; i < TotalAgents; ++i)
+	{
+		URacingAgentComponent* InactiveAgent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
+		if (InactiveAgent)
+		{
+			InactiveAgent->ForceEpisodeDone();
+			DeactivatedCount++;
+		}
+	}
+	if (DeactivatedCount > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch isolation: %d inactive agents deactivated (force-ended)"), DeactivatedCount);
+	}
 }
 
 void UNEATTrainingManager::StartEpisodeEvaluation()
 {
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting episode evaluation (Gen %d)"), CurrentGeneration);
 
-	// Reset all agents
-	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
+	// Reset only active batch agents (agents outside active batch are already force-ended in AssignGenomesToAgents)
+	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 	{
-		if (URacingAgentComponent* Agent = WeakAgent.Get())
+		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
+		if (Agent)
 		{
 			Agent->ResetEpisode();
 		}
 	}
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: reset %d active batch agents (gen=%d, batch_start=%d, batch_size=%d)"),
+		NumAgentsInCurrentBatch, CurrentGeneration, CurrentBatchStartIndex, NumAgentsInCurrentBatch);
 
 	// Start evaluation timer
 	EvaluationTimeElapsed = 0.f;

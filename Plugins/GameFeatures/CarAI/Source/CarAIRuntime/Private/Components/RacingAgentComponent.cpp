@@ -131,6 +131,7 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 	AirborneTimeAccum = 0.f;
 	StuckTimeAccum = 0.f;
 	bHasLoggedPolicyMissingThisEpisode = false;
+	bHasLoggedNEATSchemaThisEpisode = false;
 
 	AActor* Vehicle = GetVehicleActor();
 	EpisodeStartLocation = Vehicle ? Vehicle->GetActorLocation() : FVector::ZeroVector;
@@ -285,32 +286,48 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 	TArray<float> PolicyOutput;
 	bool bGotOutput = false;
 
-	if (GenomeID >= 0)
+	const int32 ExpectedInputs = (PolicyBackend && PolicyBackend->IsValid()) ? PolicyBackend->GetExpectedInputCount() : -1;
+	if (ExpectedInputs >= 0 && Obs.Vector.Num() != ExpectedInputs)
 	{
-		// NEAT evaluation: use only PolicyBackend; do not fall back to PolicyNetwork.
-		if (PolicyBackend && PolicyBackend->IsValid())
-		{
-			bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
-		}
-		if (!bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
+		if (!bHasLoggedPolicyMissingThisEpisode)
 		{
 			bHasLoggedPolicyMissingThisEpisode = true;
-			UE_LOG(LogTemp, Error, TEXT("[%s] Missing policy backend during NEAT evaluation (GenomeID=%d). Agent will not move. Assign backend via manager or LoadBestGenome."), *GetAgentLogId(), GenomeID);
-		}
-		else if (PolicyBackend && PolicyBackend->IsValid() && !bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
-		{
-			bHasLoggedPolicyMissingThisEpisode = true;
-			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
+			UE_LOG(LogTemp, Error, TEXT("[%s] Observation size mismatch: vector has %d elements, policy expects %d. NEAT path requires exactly %d inputs (no LIDAR)."),
+				*GetAgentLogId(), Obs.Vector.Num(), ExpectedInputs, FRacingObservation::NEAT_OBSERVATION_SIZE);
 		}
 	}
-	else
+	else if (PolicyBackend && PolicyBackend->IsValid())
 	{
-		// Non-NEAT: try PolicyBackend then PolicyNetwork.
-		if (PolicyBackend && PolicyBackend->IsValid())
+		if (GenomeID >= 0)
+		{
+			if (!bHasLoggedNEATSchemaThisEpisode)
+			{
+				bHasLoggedNEATSchemaThisEpisode = true;
+				UE_LOG(LogTemp, Log, TEXT("[%s] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
+					*GetAgentLogId(), FRacingObservation::NEAT_OBSERVATION_SIZE);
+			}
+			// NEAT evaluation: use only PolicyBackend; no fallback to PolicyNetwork.
+			bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
+			if (!bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
+			{
+				bHasLoggedPolicyMissingThisEpisode = true;
+				UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
+			}
+		}
+		else
 		{
 			bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
 		}
 		if (!bGotOutput && PolicyNetwork)
+		{
+			PolicyNetwork->ForwardPolicy(Obs.Vector, PolicyOutput);
+			bGotOutput = (PolicyOutput.Num() == 3);
+		}
+	}
+	else
+	{
+		// No valid PolicyBackend: non-NEAT fallback to PolicyNetwork only.
+		if (PolicyNetwork)
 		{
 			PolicyNetwork->ForwardPolicy(Obs.Vector, PolicyOutput);
 			bGotOutput = (PolicyOutput.Num() == 3);
@@ -516,15 +533,21 @@ FRacingObservation URacingAgentComponent::BuildObservation()
 		Obs.GravityZ = -1.f; // Default: pointing down
 	}
 
-	// ===== Optional LIDAR Ring =====
-
-	if (bEnableLidar)
+	// ===== Optional LIDAR Ring (not used in NEAT path; NEAT contract is fixed 15 inputs) =====
+	if (bEnableLidar && !HasNEATPolicyBackend())
 	{
 		BuildLidarObservation(Origin, Forward, Obs.LidarRays);
 	}
 
 	// ===== Build Vector =====
-	Obs.BuildVector();
+	if (HasNEATPolicyBackend())
+	{
+		Obs.BuildVectorForNEAT();
+	}
+	else
+	{
+		Obs.BuildVector();
+	}
 
 	return Obs;
 }
@@ -886,6 +909,13 @@ void URacingAgentComponent::SetPolicyBackend(UPolicyBackend* Backend)
 bool URacingAgentComponent::HasNEATPolicyBackend() const
 {
 	return PolicyBackend && PolicyBackend->IsValid();
+}
+
+void URacingAgentComponent::ForceEpisodeDone()
+{
+	bEpisodeDone = true;
+	PolicyBackend = nullptr;
+	UE_LOG(LogTemp, Log, TEXT("[%s] Agent deactivated for batch isolation (GenomeID=%d)"), *GetAgentLogId(), GenomeID);
 }
 
 // ============================================================================

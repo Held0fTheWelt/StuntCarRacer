@@ -84,6 +84,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	bool IsDone() const { return bEpisodeDone; }
 
+	/**
+	 * Deactivate this agent for batch isolation: sets episode done and clears the policy backend.
+	 * Does NOT broadcast OnEpisodeDone. Call on agents outside the active batch to prevent
+	 * stale episode completions from corrupting fitness attribution.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void ForceEpisodeDone();
+
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	int32 GetEpisodeStepCount() const { return EpisodeStepCount; }
 
@@ -259,6 +267,8 @@ protected:
 
 	/** Log policy-missing once per episode to avoid spam */
 	UPROPERTY() bool bHasLoggedPolicyMissingThisEpisode = false;
+	/** Log NEAT observation schema once per episode */
+	UPROPERTY() bool bHasLoggedNEATSchemaThisEpisode = false;
 
 	// ===== Adaptive Ray State =====
 
