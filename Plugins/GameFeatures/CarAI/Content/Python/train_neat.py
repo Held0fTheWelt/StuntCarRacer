@@ -4,49 +4,42 @@ NEAT Training for Racing AI
 =============================
 
 Uses NEAT-Python to evolve neural networks for racing car control.
+Unreal is the source of truth: run with --manifest <path> to neat_contract.json
+written by NEATTrainingManager. No fallback paths; contract must be provided.
 
 Workflow:
-1. Load fitness values from Unreal (JSON exports)
-2. NEAT evolves genomes based on fitness
-3. Export best genome to JSON for Unreal to load
+1. Load contract from Unreal (paths, observation_size, action_size)
+2. Load fitness values from contract fitness_dir
+3. NEAT evolves genomes; export to contract genome_dir
+4. Unreal loads genomes and repeats
 
 Requirements:
     pip install neat-python
 
-Usage:
-    python train_neat.py [fitness_dir] [output_dir] [num_generations]
+Usage (from Unreal):
+    python train_neat.py --manifest <path_to_neat_contract.json>
 """
 
-import os
-import sys
+import argparse
 import json
+import sys
 import neat
 import pickle
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 # ============================================================================
-# Configuration
+# Contract (loaded from Unreal manifest; no hardcoded fallbacks)
 # ============================================================================
 
-# Observation size (from RacingAgentTypes.h)
-# Adaptive Ray System with IMU Sensor
-OBS_SIZE = 16  # [Speed, YawRate, PitchRate, RollRate, 
-                # RayFwd, RayL, RayR, RayL45, RayR45, RayFUp, RayFDown, RayGround,
-                # GravityX, GravityY, GravityZ]
-
-# Action size
-ACTION_SIZE = 3  # [Steer, Throttle, Brake]
-
-# NEAT Config file
 CONFIG_FILE = "neat_config.txt"
 
 # ============================================================================
 # NEAT Config Template
 # ============================================================================
 
-NEAT_CONFIG_TEMPLATE = """
+def _config_template(obs_size: int, action_size: int) -> str:
+    return """
 [NEAT]
 fitness_criterion     = max
 fitness_threshold     = 1000.0
@@ -126,7 +119,37 @@ species_elitism      = 2
 [DefaultReproduction]
 elitism            = 2
 survival_threshold = 0.2
-""".format(obs_size=OBS_SIZE, action_size=ACTION_SIZE)
+""".format(obs_size=obs_size, action_size=action_size)
+
+# ============================================================================
+# Checkpoint (deterministic filename, one file per contract)
+# ============================================================================
+
+CHECKPOINT_FILENAME = "neat_checkpoint_latest.pkl"
+
+
+def find_checkpoint(checkpoint_dir: str) -> Optional[Path]:
+    """Return path to the single checkpoint file if it exists, else None."""
+    path = Path(checkpoint_dir) / CHECKPOINT_FILENAME
+    return path if path.is_file() else None
+
+
+def load_checkpoint(checkpoint_path: Path) -> Tuple[neat.Population, neat.Config, int]:
+    """Load (population, config, last_exported_unreal_generation). Raises on failure."""
+    with open(checkpoint_path, "rb") as f:
+        data = pickle.load(f)
+    if len(data) != 3:
+        raise ValueError(f"Checkpoint has wrong format: expected 3 items, got {len(data)}")
+    population, config, last_exported = data[0], data[1], int(data[2])
+    return population, config, last_exported
+
+
+def save_checkpoint(checkpoint_path: Path, population: neat.Population, config: neat.Config, last_exported_unreal_gen: int) -> None:
+    """Save checkpoint so the next run can resume."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(checkpoint_path, "wb") as f:
+        pickle.dump((population, config, last_exported_unreal_gen), f)
+
 
 # ============================================================================
 # Fitness Loader
@@ -138,6 +161,18 @@ class FitnessLoader:
     def __init__(self, fitness_dir: str):
         self.fitness_dir = Path(fitness_dir)
         
+    def load_for_generation(self, generation: int) -> Dict[int, float]:
+        """Load fitness for a specific Unreal generation. Returns genome_id -> fitness."""
+        path = self.fitness_dir / f"generation_{generation}.json"
+        if not path.is_file():
+            return {}
+        with open(path, "r") as f:
+            data = json.load(f)
+        fitness_map = {}
+        for genome_data in data.get("genomes", []):
+            fitness_map[genome_data["genome_id"]] = genome_data["fitness"]
+        return fitness_map
+
     def load_latest_generation(self) -> Dict[int, float]:
         """
         Load fitness values for latest generation.
@@ -184,8 +219,8 @@ class GenomeExporter:
     """Exports NEAT genome to JSON for Unreal."""
     
     @staticmethod
-    def export_genome(genome, genome_id: int, generation: int, fitness: float, 
-                     output_path: str, config: neat.Config):
+    def export_genome(genome, genome_id: int, generation: int, fitness: float,
+                      output_path: str, config: neat.Config, verbose: bool = True):
         """
         Export genome to JSON format compatible with Unreal.
         
@@ -241,172 +276,144 @@ class GenomeExporter:
         
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
-        
-        print(f"💾 Exported genome {genome_id} to: {output_file.name}")
+        if verbose:
+            print(f"💾 Exported genome {genome_id} to: {output_file.name}")
 
-# ============================================================================
-# NEAT Trainer
-# ============================================================================
 
-class NEATTrainer:
-    """Main NEAT training loop."""
-    
-    def __init__(self, config_file: str, fitness_dir: str, output_dir: str):
-        self.config = neat.Config(
-            neat.DefaultGenome,
-            neat.DefaultReproduction,
-            neat.DefaultSpeciesSet,
-            neat.DefaultStagnation,
-            config_file
-        )
-        
-        self.fitness_loader = FitnessLoader(fitness_dir)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.population = neat.Population(self.config)
-        self.stats = neat.StatisticsReporter()
-        self.population.add_reporter(self.stats)
-        self.population.add_reporter(neat.StdOutReporter(True))
-        
-        self.generation = 0
-        self.best_genome = None
-        self.best_fitness = 0.0
-    
-    def evaluate_generation(self, genomes, config):
-        """
-        Evaluate fitness for all genomes.
-        
-        This is called by NEAT after spawning a new generation.
-        We load fitness values from Unreal's JSON exports.
-        """
-        print(f"\n🧬 Generation {self.generation}")
-        print("=" * 60)
-        
-        # Load fitness values from Unreal
-        fitness_map = self.fitness_loader.load_latest_generation()
-        
-        if not fitness_map:
-            print("⚠️  No fitness values loaded! Using default fitness = 0.0")
-        
-        # Assign fitness to genomes
-        for genome_id, genome in genomes:
-            genome.fitness = fitness_map.get(genome_id, 0.0)
-            
-            # Track best genome
-            if genome.fitness > self.best_fitness:
-                self.best_fitness = genome.fitness
-                self.best_genome = genome
-                print(f"🏆 New best genome! ID={genome_id}, Fitness={genome.fitness:.2f}")
-        
-        # Export current generation genomes for Unreal to evaluate
-        self.export_generation_for_evaluation(genomes, config)
-        
-        # Export best genome
-        if self.best_genome:
-            self.export_best_genome(config)
-        
-        self.generation += 1
-    
-    def export_generation_for_evaluation(self, genomes, config):
-        """
-        Export all genomes for Unreal to evaluate.
-        
-        Unreal will:
-        1. Load this file
-        2. Spawn agents with these genomes
-        3. Evaluate fitness
-        4. Export fitness values back to fitness_dir
-        """
-        output_file = self.output_dir / f"generation_{self.generation}_genomes.json"
-        
-        genome_list = []
-        for genome_id, genome in genomes:
-            # Simplified genome export (just ID for now - Unreal will load full genome separately)
-            genome_list.append({
-                "genome_id": genome_id,
-                "generation": self.generation
-            })
-        
-        data = {
-            "generation": self.generation,
-            "population_size": len(genome_list),
-            "genomes": genome_list
-        }
-        
-        with open(output_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        
-        print(f"📤 Exported {len(genome_list)} genomes for evaluation")
-        
-        # Also export full genome data for Unreal to load
-        for genome_id, genome in genomes:
-            genome_file = self.output_dir / f"genome_{genome_id}.json"
-            GenomeExporter.export_genome(
-                genome, genome_id, self.generation, 0.0, genome_file, config
-            )
-    
-    def export_best_genome(self, config):
-        """Export best genome to 'best_genome.json'."""
-        best_file = self.output_dir / "best_genome.json"
-        GenomeExporter.export_genome(
-            self.best_genome,
-            self.best_genome.key,
-            self.generation,
-            self.best_fitness,
-            best_file,
-            config
-        )
-        print(f"🌟 Best genome exported (Fitness: {self.best_fitness:.2f})")
-    
-    def train(self, num_generations: int):
-        """Run NEAT training for specified number of generations."""
-        print(f"\n🚀 Starting NEAT Training")
-        print(f"   Generations: {num_generations}")
-        print(f"   Population: {self.config.pop_size}")
-        print(f"   Inputs: {OBS_SIZE}, Outputs: {ACTION_SIZE}")
-        print("=" * 60)
-        
-        winner = self.population.run(self.evaluate_generation, num_generations)
-        
-        print("\n✅ Training Complete!")
-        print(f"   Winner Genome ID: {winner.key}")
-        print(f"   Winner Fitness: {winner.fitness:.2f}")
-        
-        # Save final checkpoint
-        checkpoint_file = self.output_dir / f"neat_checkpoint_gen_{self.generation}.pkl"
-        with open(checkpoint_file, 'wb') as f:
-            pickle.dump((self.population, self.config, self.generation), f)
-        
-        print(f"💾 Checkpoint saved: {checkpoint_file}")
-        
-        return winner
+def export_population_for_unreal(
+    population: neat.Population,
+    config: neat.Config,
+    output_dir: Path,
+    unreal_generation: int,
+) -> None:
+    """
+    Export current population as generation_{unreal_generation}_genomes.json and genome_{id}.json.
+    Deterministic naming for Unreal.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    genomes = list(population.population.items())  # (genome_id, genome)
+
+    list_file = output_dir / f"generation_{unreal_generation}_genomes.json"
+    genome_list = [{"genome_id": gid, "generation": unreal_generation} for gid, _ in genomes]
+    with open(list_file, "w") as f:
+        json.dump({"generation": unreal_generation, "population_size": len(genome_list), "genomes": genome_list}, f, indent=2)
+    print(f"📤 Exported {len(genomes)} genomes for Unreal generation {unreal_generation} -> {list_file.name}")
+
+    for genome_id, genome in genomes:
+        genome_file = output_dir / f"genome_{genome_id}.json"
+        GenomeExporter.export_genome(genome, genome_id, unreal_generation, getattr(genome, "fitness", 0.0), str(genome_file), config, verbose=False)
+
 
 # ============================================================================
 # Main
 # ============================================================================
 
-def create_default_config(config_path: str):
+def load_contract(manifest_path: str) -> dict:
+    """Load contract JSON written by Unreal. No fallbacks; fail if missing/invalid."""
+    path = Path(manifest_path)
+    if not path.is_file():
+        print(f"ERROR: Manifest file not found: {manifest_path}", file=sys.stderr)
+        sys.exit(1)
+    with open(path, "r") as f:
+        data = json.load(f)
+    for key in ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size"):
+        if key not in data:
+            print(f"ERROR: Contract missing required key: {key}", file=sys.stderr)
+            sys.exit(1)
+    return data
+
+
+def create_default_config(config_path: str, obs_size: int, action_size: int):
     """Create default NEAT config file if it doesn't exist."""
     if not Path(config_path).exists():
         print(f"📝 Creating default config: {config_path}")
-        with open(config_path, 'w') as f:
-            f.write(NEAT_CONFIG_TEMPLATE)
+        with open(config_path, "w") as f:
+            f.write(_config_template(obs_size, action_size))
+
 
 def main():
-    # Parse arguments
-    fitness_dir = sys.argv[1] if len(sys.argv) > 1 else "Saved/Training/Fitness"
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else "Saved/Training/NEAT"
-    num_generations = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-    
-    # Create default config if needed
-    create_default_config(CONFIG_FILE)
-    
-    # Initialize trainer
-    trainer = NEATTrainer(CONFIG_FILE, fitness_dir, output_dir)
-    
-    # Train
-    trainer.train(num_generations)
+    parser = argparse.ArgumentParser(description="NEAT training driven by Unreal contract")
+    parser.add_argument("--manifest", required=True, help="Path to neat_contract.json from NEATTrainingManager")
+    args = parser.parse_args()
+
+    contract = load_contract(args.manifest)
+    fitness_dir = contract["fitness_dir"]
+    genome_dir = contract["genome_dir"]
+    checkpoint_dir = contract["checkpoint_dir"]
+    obs_size = int(contract["observation_size"])
+    action_size = int(contract["action_size"])
+    genome_dir_path = Path(genome_dir)
+    checkpoint_dir_path = Path(checkpoint_dir)
+
+    # Log resolved contract (must match Unreal logs)
+    best_genome_path = contract.get("best_genome_path", "")
+    print("[NEAT contract] Resolved directories from manifest:")
+    print(f"  fitness_dir={fitness_dir}")
+    print(f"  genome_dir={genome_dir}")
+    print(f"  checkpoint_dir={checkpoint_dir}")
+    print(f"  best_genome_path={best_genome_path}")
+    print(f"  observation_size={obs_size} action_size={action_size}")
+
+    script_dir = Path(__file__).resolve().parent
+    config_path = script_dir / CONFIG_FILE
+    create_default_config(str(config_path), obs_size, action_size)
+    config = neat.Config(
+        neat.DefaultGenome,
+        neat.DefaultReproduction,
+        neat.DefaultSpeciesSet,
+        neat.DefaultStagnation,
+        str(config_path),
+    )
+
+    checkpoint_path = find_checkpoint(checkpoint_dir)
+
+    if checkpoint_path is None:
+        # Fresh start: create initial population, export generation_0 for Unreal, save checkpoint
+        print("[NEAT] Fresh start: no checkpoint found.")
+        population = neat.Population(config)
+        population.add_reporter(neat.StdOutReporter(True))
+        export_population_for_unreal(population, config, genome_dir_path, 0)
+        save_checkpoint(checkpoint_dir_path / CHECKPOINT_FILENAME, population, config, 0)
+        print(f"[NEAT] Exported generation file: {genome_dir_path / 'generation_0_genomes.json'}")
+        print(f"[NEAT] Number of genomes exported: {len(population.population)}")
+        print(f"[NEAT] Checkpoint saved: {checkpoint_dir_path / CHECKPOINT_FILENAME}")
+        return
+
+    # Resume: load checkpoint, assign fitness for that generation, run one reproduction, export next gen
+    print(f"[NEAT] Resumed run: checkpoint file used: {checkpoint_path}")
+    population, config, last_exported = load_checkpoint(checkpoint_path)
+    print(f"[NEAT] Resumed checkpoint: last exported Unreal generation = {last_exported}")
+
+    fitness_loader = FitnessLoader(fitness_dir)
+    fitness_map = fitness_loader.load_for_generation(last_exported)
+    fitness_file = Path(fitness_dir) / f"generation_{last_exported}.json"
+    if not fitness_map:
+        print(f"ERROR: Missing fitness export for generation {last_exported}. Expected: {fitness_file}", file=sys.stderr)
+        print("[NEAT] Cannot resume without fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
+        sys.exit(1)
+
+    for genome_id, genome in population.population.items():
+        genome.fitness = fitness_map.get(genome_id, 0.0)
+
+    def eval_only_assign(genomes, cfg):
+        for gid, g in genomes:
+            g.fitness = fitness_map.get(gid, 0.0)
+
+    population.run(eval_only_assign, 1)
+    next_gen = last_exported + 1
+
+    # Best genome summary (after reproduction)
+    best_id = max(population.population.keys(), key=lambda gid: population.population[gid].fitness)
+    best_fitness = population.population[best_id].fitness
+    print(f"[NEAT] Best genome summary: genome_id={best_id} fitness={best_fitness:.2f}")
+
+    export_population_for_unreal(population, config, genome_dir_path, next_gen)
+    list_path = genome_dir_path / f"generation_{next_gen}_genomes.json"
+    print(f"[NEAT] Exported generation file: {list_path}")
+    print(f"[NEAT] Number of genomes exported: {len(population.population)}")
+    save_checkpoint(checkpoint_dir_path / CHECKPOINT_FILENAME, population, config, next_gen)
+    print(f"[NEAT] Checkpoint saved (Unreal generation {next_gen}).")
+
 
 if __name__ == "__main__":
     main()

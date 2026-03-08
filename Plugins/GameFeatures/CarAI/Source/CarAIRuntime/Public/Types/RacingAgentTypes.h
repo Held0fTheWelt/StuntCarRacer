@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "RacingAgentTypes.generated.h"
@@ -197,6 +197,7 @@ struct FRewardBreakdown
 {
 	GENERATED_BODY()
 
+	/** Reward this step from progress along track (or path length). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float Distance = 0.f;
 
@@ -354,6 +355,7 @@ struct FEpisodeStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float DurationSeconds = 0.f;
 
+	/** Progress along track (spline) or path length when no spline. cm. Used for NEAT fitness. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float DistanceTraveledCm = 0.f;
 
@@ -375,19 +377,18 @@ struct FEpisodeStats
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float NEATFitness = 0.f;
 
+	/** NEAT fitness = track progress (m) + speed bonus after 50m. Short episodes scaled down. */
 	void CalculateNEATFitness()
 	{
-		float DistanceMeters = DistanceTraveledCm / 100.f;
+		const float ProgressMeters = DistanceTraveledCm / 100.f;
 		float SpeedBonus = 0.f;
-
-		if (DistanceMeters > 50.f)
+		if (ProgressMeters > 50.f && DurationSeconds > 0.f)
 		{
-			float AvgSpeedKmh = (AvgSpeed / 100.f) * 3.6f;
-			SpeedBonus = AvgSpeedKmh * 0.1f;
+			const float ProgressCmPerSec = DistanceTraveledCm / DurationSeconds;
+			const float ProgressKmh = (ProgressCmPerSec / 100.f) * 3.6f;
+			SpeedBonus = ProgressKmh * 0.1f;
 		}
-
-		NEATFitness = DistanceMeters + SpeedBonus;
-
+		NEATFitness = ProgressMeters + SpeedBonus;
 		if (DurationSeconds < 2.0f)
 		{
 			NEATFitness *= 0.5f;

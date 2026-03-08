@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
@@ -8,20 +8,19 @@
 class USplineComponent;
 class APlayerStart;
 class USimpleNeuralNetwork;
+class UPolicyBackend;
 
 /**
  * Racing AI Agent with Adaptive Ray-based Vision and NEAT Evolution.
  *
- * Sensorik:
- * - 8 Adaptive Ray Traces (5 horizontal + 2 fixed vertical + 1 ground)
- * - Rays adjust pitch angle automatically to track limits
- * - IMU Sensor (Gravity direction for loops)
- * - Vehicle State (Speed, Angular Velocities)
+ * Runtime stepping behavior:
+ * - Not auto-activated: call Initialize() to activate and start evaluation.
+ * - Initialize(): Activates component, enables tick, calls ResetEpisode() (spawn at Player Start).
+ * - Each tick: StepOnce(DeltaTime) is called when the episode is not done (per-tick stepping).
+ * - ResetEpisode(): Respawns at Player Start and resets accumulators; stepping continues on next tick.
+ * - If PolicyNetwork is null during NEAT evaluation (GenomeID >= 0): error is logged and agent does not move.
  *
- * Training:
- * - NEAT (NeuroEvolution of Augmenting Topologies)
- * - Fitness = Distance + Speed Bonus
- * - Spawning at Player Start
+ * Sensors: 8 Adaptive Rays + IMU + Vehicle State. Training: NEAT fitness = track progress (m) + speed bonus.
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class CARAIRUNTIME_API URacingAgentComponent : public UActorComponent
@@ -47,6 +46,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	void SetNeuralNetwork(USimpleNeuralNetwork* Network);
+
+	/** Set policy backend (e.g. NEAT graph evaluator). Takes precedence over PolicyNetwork when valid. */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void SetPolicyBackend(UPolicyBackend* Backend);
 
 	// ===== Observation =====
 
@@ -74,6 +77,18 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	int32 GetEpisodeStepCount() const { return EpisodeStepCount; }
+
+	/** True if a NEAT policy backend is set and valid (executable). */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	bool HasNEATPolicyBackend() const { return PolicyBackend && PolicyBackend->IsValid(); }
+
+	/** True if a fixed network (SimpleNeuralNetwork) is set. */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	bool HasFixedNetworkPolicy() const { return PolicyNetwork != nullptr; }
+
+	/** True if the agent has any executable policy (NEAT or fixed network). */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	bool HasAnyPolicy() const { return HasNEATPolicyBackend() || HasFixedNetworkPolicy(); }
 
 	// ===== Configuration =====
 
@@ -210,6 +225,7 @@ protected:
 	// ===== Internal State =====
 
 	UPROPERTY() TObjectPtr<USimpleNeuralNetwork> PolicyNetwork;
+	UPROPERTY() TObjectPtr<UPolicyBackend> PolicyBackend;
 	UPROPERTY() FRacingObservation LastObservation;
 	UPROPERTY() FVehicleAction LastAction;
 	UPROPERTY() FEpisodeStats EpisodeStats;
@@ -220,6 +236,20 @@ protected:
 	UPROPERTY() float StuckTimeAccum = 0.f;
 	UPROPERTY() FVector EpisodeStartLocation = FVector::ZeroVector;
 	UPROPERTY() FRandomStream SpawnRng;
+
+	/** Progress along track (spline distance) or path length when no spline. cm. */
+	UPROPERTY() float AccumulatedProgressCm = 0.f;
+	/** Last distance along spline (cm) or last world position for path-length fallback */
+	UPROPERTY() float LastProgressCm = 0.f;
+	UPROPERTY() bool bHasLastProgress = false;
+	UPROPERTY() FVector LastLocation = FVector::ZeroVector;
+	/** Progress delta this step (set before ComputeReward so reward uses it). cm. */
+	UPROPERTY() float ThisStepProgressDeltaCm = 0.f;
+	/** Cached track spline for progress (resolved from world actor with tag "Track", IRoadSplineInterface). */
+	UPROPERTY() TWeakObjectPtr<USplineComponent> CachedTrackSpline;
+
+	/** Log policy-missing once per episode to avoid spam */
+	UPROPERTY() bool bHasLoggedPolicyMissingThisEpisode = false;
 
 	// ===== Adaptive Ray State =====
 
@@ -284,6 +314,13 @@ protected:
 	bool CheckTerminalConditions(const FRacingObservation& Obs, float DeltaTime, FString& OutReason);
 	void FinalizeEpisodeStats(const FString& TerminationReason);
 	FString GetAgentLogId() const;
+
+	/** Resolve track spline from world (actor tag "Track", IRoadSplineInterface). */
+	void EnsureTrackSpline();
+	/** Compute progress delta this step (spline or path length), update Last* state. Returns cm. */
+	float GetProgressDeltaCmAndUpdate(const FVector& CurrentLoc);
+	/** Wrap progress delta for closed spline (shortest signed delta). */
+	static float WrapProgressDelta(float Delta, float SplineLen);
 	void DrawObservationHUD();
 	void DrawRayAnglesDebug();
 };

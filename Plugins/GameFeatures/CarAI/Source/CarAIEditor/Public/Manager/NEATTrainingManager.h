@@ -3,11 +3,33 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "Types/RacingAgentTypes.h"
+#include "NN/NEATGenomeTypes.h"
 #include "NEATTrainingManager.generated.h"
 
 class URacingAgentComponent;
 class UPythonTrainingExecutor;
 class USimpleNeuralNetwork;
+
+// ============================================================================
+// NEAT Training Contract (Unreal = source of truth; passed to Python via manifest)
+// ============================================================================
+
+/** Single shared contract for Unreal <-> Python NEAT training. All paths absolute. */
+struct FNEATTrainingContract
+{
+	FString FitnessDir;
+	FString GenomeDir;
+	FString CheckpointDir;
+	FString BestGenomePath;
+	int32 ObservationSize = 15;  // Must match FRacingObservation (base without LIDAR)
+	int32 ActionSize = 3;        // Steer, Throttle, Brake
+
+	/** Generation file naming: fitness = generation_{N}.json, genomes list = generation_{N}_genomes.json, genome file = genome_{id}.json */
+	static inline const TCHAR* FitnessFileNameFormat = TEXT("generation_%d.json");
+	static inline const TCHAR* GenomesListFileNameFormat = TEXT("generation_%d_genomes.json");
+	static inline const TCHAR* GenomeFileNameFormat = TEXT("genome_%d.json");
+	static inline const TCHAR* BestGenomeFileName = TEXT("best_genome.json");
+};
 
 /**
  * NEAT Training Manager
@@ -18,6 +40,8 @@ class USimpleNeuralNetwork;
  * 3. Export fitness back to Python
  * 4. Wait for Python to evolve next generation
  * 5. Load new genomes and repeat
+ *
+ * Path configuration is the single source of truth; Python receives a manifest JSON.
  */
 UCLASS(BlueprintType)
 class CARAIEDITOR_API UNEATTrainingManager : public UObject
@@ -39,21 +63,29 @@ public:
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	float MaxEpisodeDuration = 120.f;
 
-	/** Export directory for fitness values */
+	/** Export directory for fitness values (relative to project saved dir, e.g. "Training/Fitness") */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
-	FString FitnessExportDir = TEXT("Saved/Training/Fitness");
+	FString FitnessExportDir = TEXT("Training/Fitness");
 
-	/** Input directory for genomes from Python */
+	/** Input directory for genomes from Python (relative to project saved dir, e.g. "Training/NEAT") */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
-	FString GenomeInputDir = TEXT("Saved/Training/NEAT");
+	FString GenomeInputDir = TEXT("Training/NEAT");
 
-	/** Python script path */
+	/** Python script: name relative to Plugins/GameFeatures/CarAI/Content/Python (e.g. "train_neat.py") */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
-	FString PythonScriptPath = TEXT("Content/Python/train_neat.py");
+	FString PythonScriptPath = TEXT("train_neat.py");
 
 	/** Python executable */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	FString PythonExecutable = TEXT("python");
+
+	/** Observation size (must match FRacingObservation base size; used in NEAT config) */
+	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "1"))
+	int32 ObservationSize = 15;
+
+	/** Action size (Steer, Throttle, Brake; must match FVehicleAction) */
+	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "1"))
+	int32 ActionSize = 3;
 
 	// ===== Training Control =====
 
@@ -94,6 +126,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	bool IsTraining() const { return TrainingState == ENEATTrainingState::Evaluating; }
 
+	/** Returns the resolved contract (absolute paths). Log at startup to verify. */
+	FNEATTrainingContract GetResolvedContract() const;
+
 	// ===== Events =====
 
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGenerationComplete, int32, Generation);
@@ -114,20 +149,26 @@ protected:
 	/** Load genomes for current generation from Python export */
 	bool LoadGenerationGenomes();
 
-	/** Assign genomes to agents */
+	/** Assign current batch of genomes to agents (uses CurrentBatchStartIndex). */
 	void AssignGenomesToAgents();
 
-	/** Start episode evaluation for all agents */
+	/** Start episode evaluation for agents in current batch */
 	void StartEpisodeEvaluation();
 
-	/** Check if all agents are done */
+	/** True if all agents in the current batch have finished their episode */
 	bool AreAllAgentsDone() const;
+
+	/** True when all genomes in this generation have been evaluated (ready to export). */
+	bool IsGenerationFullyEvaluated() const;
 
 	/** Export fitness values to JSON for Python */
 	void ExportFitnessValues();
 
 	/** Trigger Python training to evolve next generation */
 	void TriggerPythonEvolution();
+
+	/** Write manifest JSON for Python; returns path or empty on failure */
+	FString WriteContractManifest(const FNEATTrainingContract& Contract) const;
 
 	/** Callback when Python evolution is complete */
 	UFUNCTION()
@@ -146,15 +187,27 @@ protected:
 	UFUNCTION()
 	void OnAgentEpisodeDone(const FEpisodeStats& Stats);
 
+	/** Log concise NEAT status: generation, active/completed genomes, last exported fitness file, etc. */
+	void LogNEATStatusSummary(const TCHAR* Phase) const;
+
 private:
 	UPROPERTY() ENEATTrainingState TrainingState = ENEATTrainingState::Idle;
 	UPROPERTY() FNEATTrainingStats TrainingStats;
 	UPROPERTY() int32 CurrentGeneration = 0;
 	UPROPERTY() TArray<TWeakObjectPtr<URacingAgentComponent>> Agents;
-	UPROPERTY() TArray<FNEATGenomeData> CurrentGenomes;
-	UPROPERTY() TMap<int32, float> GenomeFitnessMap; // genome_id -> fitness
+	UPROPERTY() TArray<FNEATGenome> CurrentGenomes;
+	UPROPERTY() TMap<int32, float> GenomeFitnessMap; // genome_id -> fitness (accumulated across batches)
 	UPROPERTY() TObjectPtr<UPythonTrainingExecutor> PythonExecutor;
 	UPROPERTY() float EvaluationTimeElapsed = 0.f;
 	UPROPERTY() FTimerHandle EvaluationTickTimer;
 	UPROPERTY() bool bWaitingForPython = false;
+
+	/** Batch mode: index into CurrentGenomes for the start of the current batch */
+	UPROPERTY() int32 CurrentBatchStartIndex = 0;
+	/** Number of agents that were assigned a genome in the current batch (only these must finish) */
+	UPROPERTY() int32 NumAgentsInCurrentBatch = 0;
+	/** Last successfully exported fitness file path (for diagnostics). */
+	UPROPERTY() FString LastExportedFitnessFilePath;
+	/** Last successfully loaded best genome path (for diagnostics). */
+	UPROPERTY() FString LastLoadedBestGenomePath;
 };

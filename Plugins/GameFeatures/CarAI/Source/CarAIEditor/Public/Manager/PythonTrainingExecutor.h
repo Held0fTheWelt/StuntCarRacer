@@ -6,7 +6,8 @@
 #include "PythonTrainingExecutor.generated.h"
 
 /**
- * Führt Python-Training-Scripts aus und überwacht den Prozess
+ * Runs Python training scripts and monitors the process.
+ * Script path is relative to Plugins/GameFeatures/CarAI/Content/Python (e.g. "train_neat.py").
  */
 UCLASS()
 class CARAIEDITOR_API UPythonTrainingExecutor : public UObject
@@ -16,39 +17,39 @@ class CARAIEDITOR_API UPythonTrainingExecutor : public UObject
 public:
 	UPythonTrainingExecutor();
 
-	/** Startet Python-Training-Script und wartet auf Fertigstellung */
+	/** Runs Python training script and waits for completion */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	bool ExecuteTraining(const FString& PythonScriptPath, const FString& PythonExecutablePath = TEXT("python"));
 
-	/** Startet Python-Training-Script asynchron (non-blocking) */
+	/** Runs Python training script asynchron. Pass manifest path (neat_contract.json) written by NEATTrainingManager. */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
-	void ExecuteTrainingAsync(const FString& PythonScriptPath, const FString& PythonExecutablePath = TEXT("python"), int32 NumEpochs = 10);
+	void ExecuteTrainingAsync(const FString& PythonScriptPath, const FString& PythonExecutablePath, const FString& ManifestPath);
 
-	/** Prüft ob Training noch läuft */
+	/** Returns true if training is still running */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	bool IsTrainingInProgress() const;
 
-	/** Wartet auf Training-Fertigstellung (blockiert!) */
+	/** Blocks until training completes or timeout */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	bool WaitForTraining(float TimeoutSeconds = 300.0f);
 
-	/** Stoppt laufendes Training */
+	/** Stops running training */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	void StopTraining();
 
-	/** Gibt Exit-Code des letzten Trainings zurück (0 = Erfolg) */
+	/** Last run exit code (0 = success) */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	int32 GetLastExitCode() const { return LastExitCode; }
 
-	/** Gibt Output des letzten Trainings zurück */
+	/** Last run full output */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	FString GetLastOutput() const { return LastOutput; }
 
-	/** Gibt Pfad zur Python-Log-Datei zurück */
+	/** Path to Python log file */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	FString GetPythonLogFilePath() const { return PythonLogFilePath; }
 
-	/** Liest Python-Log-Datei ein und gibt sie in Unreal-Logs aus (optional) */
+	/** Reads Python log and prints to Unreal log */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	void ShowPythonLog();
 
@@ -57,7 +58,6 @@ public:
 	FOnTrainingCompleted OnTrainingCompleted;
 
 protected:
-	/** Callback für asynchrones Training */
 	void OnTrainingCompletedInternal(bool bSuccess);
 
 private:
@@ -65,16 +65,11 @@ private:
 	FString LastOutput;
 	int32 LastExitCode = -1;
 	bool bTrainingInProgress = false;
-	
-	/** Pfad zur Python-Log-Datei (wird während Training geschrieben) */
 	FString PythonLogFilePath;
-	
-	/** Position in Log-Datei (für inkrementelles Lesen) */
 	int64 LastLogReadPosition = 0;
 
+	/** Resolves script to absolute path. Input: "train_neat.py" or "Content/Python/train_neat.py" -> Plugin Content/Python + script name. */
 	FString FindPythonScript(const FString& ScriptName) const;
 	FString FindPythonExecutable(const FString& ExecutableName) const;
-	
-	/** Liest neue Zeilen aus Python-Log-Datei und gibt sie im Unreal Log aus (wird in Background-Thread aufgerufen) */
 	void ReadPythonLogToUnrealLog();
 };

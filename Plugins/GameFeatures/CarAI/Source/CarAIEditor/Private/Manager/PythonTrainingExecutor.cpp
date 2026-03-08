@@ -16,23 +16,34 @@ UPythonTrainingExecutor::UPythonTrainingExecutor()
 
 FString UPythonTrainingExecutor::FindPythonScript(const FString& ScriptName) const
 {
-	// Wenn absoluter Pfad angegeben, verwende diesen
-	if (FPaths::IsRelative(ScriptName))
+	if (ScriptName.IsEmpty())
 	{
-		// Suche im Content/Python-Verzeichnis
-		FString PluginContentDir = FPaths::ProjectPluginsDir() / TEXT("GameFeatures/CarAI/Content/Python");
-		FString ScriptPath = PluginContentDir / ScriptName;
-		
-		if (FPaths::FileExists(ScriptPath))
+		return FString();
+	}
+
+	// Absolute path: use as-is if file exists
+	if (!FPaths::IsRelative(ScriptName))
+	{
+		if (FPaths::FileExists(ScriptName))
 		{
-			return ScriptPath;
+			return ScriptName;
 		}
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Script path is absolute but file not found: %s"), *ScriptName);
+		return FString();
 	}
-	else if (FPaths::FileExists(ScriptName))
+
+	// Relative: resolve against Plugins/GameFeatures/CarAI/Content/Python (script name only, no nested Content/Python)
+	FString ScriptNameOnly = ScriptName;
+	ScriptNameOnly.ReplaceInline(TEXT("Content/Python/"), TEXT(""));
+	ScriptNameOnly.ReplaceInline(TEXT("Content\\Python\\"), TEXT(""));
+	FString PluginContentDir = FPaths::ProjectPluginsDir() / TEXT("GameFeatures/CarAI/Content/Python");
+	FString ScriptPath = FPaths::Combine(PluginContentDir, ScriptNameOnly);
+
+	if (FPaths::FileExists(ScriptPath))
 	{
-		return ScriptName;
+		return ScriptPath;
 	}
-	
+	UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Script not found at %s (resolved from %s)"), *ScriptPath, *ScriptName);
 	return FString();
 }
 
@@ -57,14 +68,14 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 {
 	if (bTrainingInProgress)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training läuft bereits!"));
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training already in progress"));
 		return false;
 	}
 
 	FString ScriptPath = FindPythonScript(PythonScriptPath);
 	if (ScriptPath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script nicht gefunden: %s"), *PythonScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script not found: %s"), *PythonScriptPath);
 		return false;
 	}
 
@@ -96,7 +107,7 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 
 	if (!TrainingProcessHandle.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Konnte Prozess nicht starten!"));
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to start process"));
 		bTrainingInProgress = false;
 		return false;
 	}
@@ -118,11 +129,11 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 	
 	if (bSuccess)
 	{
-		UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training erfolgreich abgeschlossen (Exit Code: %d)"), LastExitCode);
+		UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training completed successfully (Exit Code: %d)"), LastExitCode);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training fehlgeschlagen (Exit Code: %d)"), LastExitCode);
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training failed (Exit Code: %d)"), LastExitCode);
 	}
 
 	OnTrainingCompleted.Broadcast(bSuccess);
@@ -130,29 +141,31 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 	return bSuccess;
 }
 
-void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPath, const FString& PythonExecutablePath, int32 NumEpochs)
+void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPath, const FString& PythonExecutablePath, const FString& ManifestPath)
 {
 	if (bTrainingInProgress)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training läuft bereits!"));
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training already in progress"));
+		return;
+	}
+
+	if (ManifestPath.IsEmpty() || !FPaths::FileExists(ManifestPath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Manifest path missing or file not found: %s"), *ManifestPath);
+		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
 
 	FString ScriptPath = FindPythonScript(PythonScriptPath);
 	if (ScriptPath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script nicht gefunden: %s"), *PythonScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script not found: %s"), *PythonScriptPath);
 		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
 
 	FString PythonExe = FindPythonExecutable(PythonExecutablePath);
-	
-	// Erstelle Kommandozeile mit Pfaden als Argumente
-	FString ExportDir = FPaths::ProjectSavedDir() / TEXT("Training/Exports");
-	FString ModelDir = FPaths::ProjectSavedDir() / TEXT("Training/Models");
-	
-	// Erstelle temporäre Log-Datei für Python-Output
+
 	FString LogDir = FPaths::ProjectSavedDir() / TEXT("Training/Logs");
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	if (!PlatformFile.DirectoryExists(*LogDir))
@@ -161,41 +174,34 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 	}
 	FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 	PythonLogFilePath = LogDir / FString::Printf(TEXT("python_training_%s.log"), *Timestamp);
-	
-	// Erstelle Batch-Script für zuverlässige Umleitung
+
 	FString BatchScriptPath = LogDir / FString::Printf(TEXT("run_training_%s.bat"), *Timestamp);
-	
-	// Erstelle Batch-Script Inhalt - alle Pfade müssen in Anführungszeichen sein
 	FString ScriptDir = FPaths::GetPath(ScriptPath);
+	// Run: python script --manifest <path> (all paths quoted)
 	FString BatchScriptContent = FString::Printf(
 		TEXT("@echo off\n")
 		TEXT("cd /d \"%s\"\n")
-		TEXT("\"%s\" \"%s\" \"%s\" \"%s\" \"%d\" > \"%s\" 2>&1\n")
+		TEXT("\"%s\" \"%s\" --manifest \"%s\" > \"%s\" 2>&1\n")
 		TEXT("set EXIT_CODE=%%ERRORLEVEL%%\n")
 		TEXT("exit /b %%EXIT_CODE%%\n"),
 		*ScriptDir,
 		*PythonExe,
 		*ScriptPath,
-		*ExportDir,
-		*ModelDir,
-		NumEpochs,
+		*ManifestPath,
 		*PythonLogFilePath
 	);
-	
-	// Schreibe Batch-Script
+
 	if (!FFileHelper::SaveStringToFile(BatchScriptContent, *BatchScriptPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Konnte Batch-Script nicht erstellen: %s"), *BatchScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to write batch script: %s"), *BatchScriptPath);
 		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
-	
-	// Kommandozeile für Batch-Script
+
 	FString CommandLine = FString::Printf(TEXT("/c \"%s\""), *BatchScriptPath);
 
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Starte Training asynchron"));
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Python-Command: %s %s %s %s %d"), *PythonExe, *ScriptPath, *ExportDir, *ModelDir, NumEpochs);
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Python-Output wird in Log-Datei geschrieben: %s"), *PythonLogFilePath);
+	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Starting training (script=%s manifest=%s)"), *ScriptPath, *ManifestPath);
+	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Log file: %s"), *PythonLogFilePath);
 
 	bTrainingInProgress = true;
 	LastOutput = TEXT("");
@@ -270,17 +276,15 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 			LastExitCode = ExitCode;
 			bool bSuccess = (ExitCode == 0);
 			
-			// Zeige finale Zusammenfassung im Log
 			if (bSuccess)
 			{
-				UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training erfolgreich abgeschlossen (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training completed successfully (Exit Code: %d)"), ExitCode);
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training fehlgeschlagen (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training failed (Exit Code: %d)"), ExitCode);
 			}
-			
-			UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Vollständiger Output verfügbar in: %s"), *PythonLogFilePath);
+			UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Full output: %s"), *PythonLogFilePath);
 			
 			OnTrainingCompleted.Broadcast(bSuccess);
 		});
@@ -315,7 +319,7 @@ void UPythonTrainingExecutor::StopTraining()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Stoppe Training..."));
+	UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Stopping training..."));
 	FPlatformProcess::TerminateProc(TrainingProcessHandle, true);
 	FPlatformProcess::CloseProc(TrainingProcessHandle);
 	TrainingProcessHandle.Reset();
@@ -330,7 +334,6 @@ void UPythonTrainingExecutor::ReadPythonLogToUnrealLog()
 		return;
 	}
 
-	// Lese Datei ab LastLogReadPosition
 	IFileHandle* FileHandle = FPlatformFileManager::Get().GetPlatformFile().OpenRead(*PythonLogFilePath);
 	if (!FileHandle)
 	{
@@ -344,7 +347,6 @@ void UPythonTrainingExecutor::ReadPythonLogToUnrealLog()
 		return;
 	}
 
-	// Lese neue Daten
 	int64 BytesToRead = FileSize - LastLogReadPosition;
 	TArray<uint8> Buffer;
 	Buffer.SetNumUninitialized(BytesToRead);
@@ -359,19 +361,14 @@ void UPythonTrainingExecutor::ReadPythonLogToUnrealLog()
 	delete FileHandle;
 	LastLogReadPosition = FileSize;
 
-	// Konvertiere zu String und teile in Zeilen
-	// Buffer enthält ANSI-Bytes, konvertiere zu FString
 	FString NewContent = FString(BytesToRead, (const ANSICHAR*)Buffer.GetData());
 	
-	// Teile in Zeilen und logge jede Zeile
 	TArray<FString> Lines;
 	NewContent.ParseIntoArrayLines(Lines, false);
-	
 	for (const FString& Line : Lines)
 	{
 		if (!Line.IsEmpty())
 		{
-			// Logge auf Game-Thread (muss über AsyncTask, da wir im Background-Thread sind)
 			FString LineToLog = Line; // Kopie für Lambda
 			AsyncTask(ENamedThreads::GameThread, [LineToLog]()
 			{
@@ -385,21 +382,20 @@ void UPythonTrainingExecutor::ShowPythonLog()
 {
 	if (PythonLogFilePath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Keine Log-Datei verfügbar (Pfad ist leer)"));
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: No log file (path empty)"));
 		return;
 	}
 
 	if (!FPaths::FileExists(PythonLogFilePath))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Log-Datei existiert nicht: %s"), *PythonLogFilePath);
+		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Log file not found: %s"), *PythonLogFilePath);
 		return;
 	}
 
-	// Lese komplette Log-Datei
 	FString LogContent;
 	if (!FFileHelper::LoadFileToString(LogContent, *PythonLogFilePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Konnte Log-Datei nicht lesen: %s"), *PythonLogFilePath);
+		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to read log file: %s"), *PythonLogFilePath);
 		return;
 	}
 
@@ -407,10 +403,8 @@ void UPythonTrainingExecutor::ShowPythonLog()
 	UE_LOG(LogTemp, Log, TEXT("PYTHON TRAINING LOG: %s"), *PythonLogFilePath);
 	UE_LOG(LogTemp, Log, TEXT("========================================"));
 
-	// Teile in Zeilen und logge jede Zeile
 	TArray<FString> Lines;
 	LogContent.ParseIntoArrayLines(Lines, false);
-
 	for (const FString& Line : Lines)
 	{
 		if (!Line.IsEmpty())
@@ -420,6 +414,6 @@ void UPythonTrainingExecutor::ShowPythonLog()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("========================================"));
-	UE_LOG(LogTemp, Log, TEXT("ENDE PYTHON TRAINING LOG (%d Zeilen)"), Lines.Num());
+	UE_LOG(LogTemp, Log, TEXT("END PYTHON TRAINING LOG (%d lines)"), Lines.Num());
 	UE_LOG(LogTemp, Log, TEXT("========================================"));
 }

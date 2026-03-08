@@ -1,11 +1,14 @@
-﻿#include "Components/RacingAgentComponent.h"
+#include "Components/RacingAgentComponent.h"
 #include "NN/SimpleNeuralNetwork.h"
+#include "NN/NEATPolicyBackend.h"
 
 #include "GameFramework/PlayerStart.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SplineComponent.h"
+#include "Interfaces/RoadSplineInterface.h"
 #include "WheeledVehiclePawn.h"
 #include "ChaosWheeledVehicleMovementComponent.h"
 
@@ -17,6 +20,7 @@ URacingAgentComponent::URacingAgentComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+	// Not auto-activated: manager (or Blueprint) must call Initialize() to activate and start stepping.
 	bAutoActivate = false;
 }
 
@@ -53,17 +57,21 @@ void URacingAgentComponent::BeginPlay()
 void URacingAgentComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// Deterministic per-tick stepping: when active and episode not done, run one policy step.
+	if (!bEpisodeDone && DeltaTime > 0.f)
+	{
+		StepOnce(DeltaTime);
+	}
 }
 
 void URacingAgentComponent::Initialize()
 {
-	if (bEnableLogging)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[%s] Initialize()"), *GetAgentLogId());
-	}
-
-	ResetEpisode();
+	Activate();
 	SetComponentTickEnabled(true);
+	ResetEpisode();
+
+	UE_LOG(LogTemp, Log, TEXT("[%s] Agent initialized (active, stepping enabled)"), *GetAgentLogId());
 }
 
 // ============================================================================
@@ -122,8 +130,21 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 	EpisodeTimeAccum = 0.f;
 	AirborneTimeAccum = 0.f;
 	StuckTimeAccum = 0.f;
+	bHasLoggedPolicyMissingThisEpisode = false;
 
-	EpisodeStartLocation = GetVehicleActor()->GetActorLocation();
+	AActor* Vehicle = GetVehicleActor();
+	EpisodeStartLocation = Vehicle ? Vehicle->GetActorLocation() : FVector::ZeroVector;
+
+	AccumulatedProgressCm = 0.f;
+	bHasLastProgress = false;
+	LastLocation = EpisodeStartLocation;
+	EnsureTrackSpline();
+	if (CachedTrackSpline.IsValid())
+	{
+		const float Key = CachedTrackSpline->FindInputKeyClosestToWorldLocation(EpisodeStartLocation);
+		LastProgressCm = CachedTrackSpline->GetDistanceAlongSplineAtSplineInputKey(Key);
+		bHasLastProgress = true;
+	}
 
 	EpisodeStats = FEpisodeStats();
 	EpisodeStats.StartTime = FDateTime::Now();
@@ -133,7 +154,6 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 
 	LastAction = FVehicleAction();
 
-	// Reset IMU
 	SmoothedGravityLocal = FVector(0, 0, -1);
 }
 
@@ -144,6 +164,80 @@ void URacingAgentComponent::ResetAdaptiveRays()
 	RayState_Right.Reset();
 	RayState_Left45.Reset();
 	RayState_Right45.Reset();
+}
+
+void URacingAgentComponent::EnsureTrackSpline()
+{
+	if (CachedTrackSpline.IsValid())
+	{
+		return;
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	TArray<AActor*> Tagged;
+	UGameplayStatics::GetAllActorsWithTag(World, FName("Track"), Tagged);
+	for (AActor* Actor : Tagged)
+	{
+		if (Actor && Actor->GetClass()->ImplementsInterface(URoadSplineInterface::StaticClass()))
+		{
+			USplineComponent* Spline = IRoadSplineInterface::Execute_GetRoadSpline(Actor);
+			if (Spline)
+			{
+				CachedTrackSpline = Spline;
+				if (bEnableLogging)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[%s] Track spline resolved for progress (length %.1fm)"), *GetAgentLogId(), Spline->GetSplineLength() / 100.f);
+				}
+				return;
+			}
+		}
+	}
+}
+
+float URacingAgentComponent::WrapProgressDelta(float Delta, float SplineLen)
+{
+	if (SplineLen <= 0.f)
+	{
+		return Delta;
+	}
+	const float Half = 0.5f * SplineLen;
+	if (Delta > Half)
+	{
+		Delta -= SplineLen;
+	}
+	else if (Delta < -Half)
+	{
+		Delta += SplineLen;
+	}
+	return Delta;
+}
+
+float URacingAgentComponent::GetProgressDeltaCmAndUpdate(const FVector& CurrentLoc)
+{
+	EnsureTrackSpline();
+	USplineComponent* Spline = CachedTrackSpline.Get();
+	if (Spline && Spline->GetSplineLength() > 1.f)
+	{
+		const float Key = Spline->FindInputKeyClosestToWorldLocation(CurrentLoc);
+		const float CurrentS = Spline->GetDistanceAlongSplineAtSplineInputKey(Key);
+		const float Len = Spline->GetSplineLength();
+		float Delta = 0.f;
+		if (bHasLastProgress)
+		{
+			Delta = WrapProgressDelta(CurrentS - LastProgressCm, Len);
+		}
+		LastProgressCm = CurrentS;
+		bHasLastProgress = true;
+		return Delta;
+	}
+	// Fallback: path length (actual distance moved)
+	const float PathDelta = bHasLastProgress ? (CurrentLoc - LastLocation).Size() : 0.f;
+	LastLocation = CurrentLoc;
+	bHasLastProgress = true;
+	return PathDelta;
 }
 
 // ============================================================================
@@ -157,53 +251,99 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		return;
 	}
 
+	// First step this episode: log that stepping has started
+	if (EpisodeStepCount == 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[%s] Agent started stepping (GenomeID=%d)"), *GetAgentLogId(), GenomeID);
+	}
+
 	// 1. Build Observation
 	FRacingObservation Obs = BuildObservation();
 	LastObservation = Obs;
 
-	// 2. Compute Reward
+	// 2. Progress along track (spline) or path length (fallback)
+	FVector CurrentLoc = GetVehicleActor()->GetActorLocation();
+	ThisStepProgressDeltaCm = GetProgressDeltaCmAndUpdate(CurrentLoc);
+	AccumulatedProgressCm += ThisStepProgressDeltaCm;
+
+	// 3. Compute Reward (uses ThisStepProgressDeltaCm for distance)
 	FRewardBreakdown Reward = ComputeReward(Obs, DeltaTime);
 
-	// 3. Get Action from Policy Network
+	// 4. Get Action from policy (PolicyBackend e.g. NEAT first, else PolicyNetwork)
 	FVehicleAction Action;
-	if (PolicyNetwork)
+	TArray<float> PolicyOutput;
+	bool bGotOutput = false;
+	if (PolicyBackend && PolicyBackend->IsValid())
 	{
-		TArray<float> PolicyOutput;
+		bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
+	}
+	if (!bGotOutput && PolicyNetwork)
+	{
 		PolicyNetwork->ForwardPolicy(Obs.Vector, PolicyOutput);
-		if (PolicyOutput.Num() == 3)
-		{
-			Action.Steer = FMath::Clamp(PolicyOutput[0], -1.f, 1.f);
-			Action.Throttle = FMath::Clamp(PolicyOutput[1], 0.f, 1.f);
-			Action.Brake = FMath::Clamp(PolicyOutput[2], 0.f, 1.f);
-		}
+		bGotOutput = (PolicyOutput.Num() == 3);
+	}
+	if (bGotOutput && PolicyOutput.Num() >= 3)
+	{
+		// Clamp at agent layer (not inside backend)
+		Action.Steer = FMath::Clamp(PolicyOutput[0], -1.f, 1.f);
+		Action.Throttle = FMath::Clamp(PolicyOutput[1], 0.f, 1.f);
+		Action.Brake = FMath::Clamp(PolicyOutput[2], 0.f, 1.f);
 	}
 	else
 	{
-		// Fallback: Go forward
-		Action.Steer = 0.f;
-		Action.Throttle = 0.5f;
-		Action.Brake = 0.f;
+		if (PolicyBackend && PolicyBackend->IsValid() && !bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
+		{
+			bHasLoggedPolicyMissingThisEpisode = true;
+			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
+		}
+		else if (!bHasLoggedPolicyMissingThisEpisode)
+		{
+			bHasLoggedPolicyMissingThisEpisode = true;
+			if (GenomeID >= 0)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[%s] NEAT evaluation has no policy backend (GenomeID=%d). Agent will not move. Load genome or set PolicyNetwork."), *GetAgentLogId(), GenomeID);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[%s] No PolicyNetwork set. Using fallback forward drive for gameplay."), *GetAgentLogId());
+			}
+		}
+		// NEAT evaluation (GenomeID >= 0): zero action so failure is visible
+		if (GenomeID >= 0)
+		{
+			Action.Steer = 0.f;
+			Action.Throttle = 0.f;
+			Action.Brake = 0.f;
+		}
+		else
+		{
+			Action.Steer = 0.f;
+			Action.Throttle = 0.5f;
+			Action.Brake = 0.f;
+		}
 	}
 
-	// 4. Apply Action
+	// Smoothness: penalize steer change (was incorrectly steer vs speed)
+	Reward.Smoothness = FMath::Abs(Action.Steer - LastAction.Steer) * RewardCfg.W_ActionSmooth;
+	Reward.Total = Reward.Distance + Reward.Survival + Reward.Speed + Reward.Smoothness + Reward.Collision + Reward.GapPenalty;
+	Reward.Total = FMath::Clamp(Reward.Total, -RewardCfg.MaxAbsTerm, RewardCfg.MaxAbsTerm);
+
+	// 5. Apply Action
 	ApplyAction(Action);
 	LastAction = Action;
 
-	// 5. Update Episode Stats
+	// 6. Update Episode Stats
 	EpisodeStepCount++;
 	EpisodeTimeAccum += DeltaTime;
 	EpisodeStats.TotalReward += Reward.Total;
 	EpisodeStats.StepCount = EpisodeStepCount;
 	EpisodeStats.DurationSeconds = EpisodeTimeAccum;
-
-	FVector CurrentLoc = GetVehicleActor()->GetActorLocation();
-	float DistThisStep = (CurrentLoc - EpisodeStartLocation).Size();
-	EpisodeStats.DistanceTraveledCm = DistThisStep;
+	EpisodeStats.DistanceTraveledCm = AccumulatedProgressCm;
 
 	float CurrentSpeed = Obs.SpeedNorm * SpeedNormCmPerSec;
 	EpisodeStats.MaxSpeed = FMath::Max(EpisodeStats.MaxSpeed, CurrentSpeed);
 
-	// 6. Check Terminal Conditions
+	// 7. Check Terminal Conditions
 	FString TermReason;
 	if (CheckTerminalConditions(Obs, DeltaTime, TermReason) || Reward.bDone)
 	{
@@ -217,26 +357,25 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 
 		OnEpisodeDone.Broadcast(EpisodeStats);
 
-		if (bEnableLogging)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[%s] Episode done: %s (Fitness: %.2f, Steps: %d, Distance: %.1fm)"),
-				*GetAgentLogId(), *TermReason, EpisodeStats.NEATFitness, EpisodeStats.StepCount,
-				EpisodeStats.DistanceTraveledCm / 100.f);
-		}
+		UE_LOG(LogTemp, Log, TEXT("[%s] Episode done: %s (Fitness: %.2f, Steps: %d, Progress: %.1fm)"),
+			*GetAgentLogId(), *TermReason, EpisodeStats.NEATFitness, EpisodeStats.StepCount,
+			EpisodeStats.DistanceTraveledCm / 100.f);
+		UE_LOG(LogTemp, Log, TEXT("[%s] Reward breakdown: Distance=%.3f Survival=%.3f Speed=%.3f Smoothness=%.3f Collision=%.3f Gap=%.3f Total=%.3f"),
+			*GetAgentLogId(), Reward.Distance, Reward.Survival, Reward.Speed, Reward.Smoothness, Reward.Collision, Reward.GapPenalty, Reward.Total);
 
 		return;
 	}
 
-	// 7. Update Adaptive Rays
+	// 8. Update Adaptive Rays
 	if (bEnableAdaptiveRays)
 	{
 		UpdateAdaptiveRayAngles();
 	}
 
-	// 8. Broadcast step completed
+	// 9. Broadcast step completed
 	OnStepCompleted.Broadcast(Obs, Reward);
 
-	// 9. Debug HUD
+	// 10. Debug HUD
 	if (bDrawObservationHUD)
 	{
 		DrawObservationHUD();
@@ -523,29 +662,26 @@ FRewardBreakdown URacingAgentComponent::ComputeReward(const FRacingObservation& 
 {
 	FRewardBreakdown R;
 
-	// ===== Distance Reward =====
+	// ===== Distance Reward (progress along track or path length this step) =====
 
-	FVector CurrentLoc = GetVehicleActor()->GetActorLocation();
-	float DistanceMeters = (CurrentLoc - EpisodeStartLocation).Size() / 100.f;
-
-	R.Distance = DistanceMeters * RewardCfg.W_Distance;
+	const float ProgressMetersThisStep = ThisStepProgressDeltaCm / 100.f;
+	R.Distance = ProgressMetersThisStep * RewardCfg.W_Distance;
 
 	// ===== Survival Bonus =====
 
 	R.Survival = EpisodeTimeAccum * RewardCfg.W_Survival;
 
-	// ===== Speed Bonus (Phase 2) =====
+	// ===== Speed Bonus (Phase 2, after enough progress) =====
 
-	if (EpisodeStats.DistanceTraveledCm > RewardCfg.Phase2ActivationDistanceCm)
+	if (AccumulatedProgressCm > RewardCfg.Phase2ActivationDistanceCm)
 	{
-		float SpeedDiff = FMath::Abs(Obs.SpeedNorm - RewardCfg.SpeedTargetNorm);
+		const float SpeedDiff = FMath::Abs(Obs.SpeedNorm - RewardCfg.SpeedTargetNorm);
 		R.Speed = (1.f - SpeedDiff) * RewardCfg.W_Speed;
 	}
 
-	// ===== Smoothness =====
+	// ===== Smoothness (set in StepOnce from steer change: |Action.Steer - LastAction.Steer|) =====
 
-	float SteerDiff = FMath::Abs(LastAction.Steer - Obs.SpeedNorm); // Simplified
-	R.Smoothness = SteerDiff * RewardCfg.W_ActionSmooth;
+	R.Smoothness = 0.f;
 
 	// ===== Collision Penalty (Adaptive Rays) =====
 
@@ -717,6 +853,11 @@ FString URacingAgentComponent::GetAgentLogId() const
 void URacingAgentComponent::SetNeuralNetwork(USimpleNeuralNetwork* Network)
 {
 	PolicyNetwork = Network;
+}
+
+void URacingAgentComponent::SetPolicyBackend(UPolicyBackend* Backend)
+{
+	PolicyBackend = Backend;
 }
 
 // ============================================================================
