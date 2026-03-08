@@ -557,6 +557,10 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 			*GetAgentLogId(), *OwnerClass, bCarResolvedViaInterface ? TEXT("yes") : TEXT("no"),
 			Vehicle ? *Vehicle->GetClass()->GetName() : TEXT("null"), RootPrim ? *RootPrim->GetClass()->GetName() : TEXT("null"), MovComp ? TEXT("present") : TEXT("missing"),
 			(int32)RuntimeState, GenomeID, Generation);
+		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Terminal check config: MaxSteps=%d StuckSpeedNorm=%.3f StuckSec=%.1f AirborneSec=%.1f Grace=%.1f ForcedForward=%s ForcedForwardDur=%.1f"),
+			*GetAgentLogId(), RewardCfg.MaxEpisodeSteps, RewardCfg.StuckSpeedNorm, RewardCfg.StuckTimeSeconds,
+			RewardCfg.AirborneMaxSeconds, RewardCfg.GraceSecondsAfterReset,
+			bEnableForcedForwardDiagnostic ? TEXT("on") : TEXT("off"), ForcedForwardDiagnosticDuration);
 	}
 	else if (bEnableLogging && (EpisodeStepCount % 100 == 0))
 	{
