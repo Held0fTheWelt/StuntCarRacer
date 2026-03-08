@@ -149,6 +149,7 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 
 	EpisodeStats = FEpisodeStats();
 	EpisodeStats.StartTime = FDateTime::Now();
+	EpisodeStats.AgentInstanceID = (int32)GetUniqueID();
 	EpisodeStats.DistanceTraveledCm = 0.f;
 	EpisodeStats.MaxSpeed = 0.f;
 	EpisodeStats.AvgSpeed = 0.f;

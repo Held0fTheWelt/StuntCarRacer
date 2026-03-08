@@ -617,34 +617,46 @@ void UNEATTrainingManager::LogGenerationEvaluationProgress(const TCHAR* Phase) c
 
 void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 {
-	// Find agent that triggered this
-	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
+	// Ignore events when not actively evaluating (can fire from force-ended or leftover episodes)
+	if (TrainingState != ENEATTrainingState::Evaluating)
 	{
-		if (URacingAgentComponent* Agent = WeakAgent.Get())
-		{
-			if (Agent->GetEpisodeStats().StartTime == Stats.StartTime)
-			{
-				// Record fitness
-				GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
-
-				// Update best fitness
-				if (Stats.NEATFitness > TrainingStats.BestFitness)
-				{
-					TrainingStats.BestFitness = Stats.NEATFitness;
-					TrainingStats.BestGenomeID = Agent->GenomeID;
-
-					OnNewBestGenome.Broadcast(Agent->GenomeID, Stats.NEATFitness);
-
-					UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] New best genome! ID=%d, Fitness=%.2f"),
-						Agent->GenomeID, Stats.NEATFitness);
-				}
-
-				break;
-			}
-		}
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Ignoring episode-done event outside Evaluating state (agent_id=%d, genome_id ignored)"), Stats.AgentInstanceID);
+		return;
 	}
 
-	TrainingStats.TotalEvaluations++;
+	// Match by AgentInstanceID within the active batch only (indices [0..NumAgentsInCurrentBatch-1])
+	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
+	{
+		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
+		if (!Agent)
+		{
+			continue;
+		}
+		if ((int32)Agent->GetUniqueID() != Stats.AgentInstanceID)
+		{
+			continue;
+		}
+
+		// Unambiguous match: this active-batch agent produced this episode result
+		GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Fitness attributed: agent_id=%d genome_id=%d fitness=%.2f termination=%s"),
+			Stats.AgentInstanceID, Agent->GenomeID, Stats.NEATFitness, *Stats.TerminationReason);
+
+		if (Stats.NEATFitness > TrainingStats.BestFitness)
+		{
+			TrainingStats.BestFitness = Stats.NEATFitness;
+			TrainingStats.BestGenomeID = Agent->GenomeID;
+			OnNewBestGenome.Broadcast(Agent->GenomeID, Stats.NEATFitness);
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] New best genome: genome_id=%d fitness=%.2f"), Agent->GenomeID, Stats.NEATFitness);
+		}
+
+		TrainingStats.TotalEvaluations++;
+		return;
+	}
+
+	// No match in active batch: reject with explicit log
+	UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Episode-done event rejected: agent_id=%d not found in active batch (batch_size=%d, total_agents=%d). This may be a deactivated inactive agent."),
+		Stats.AgentInstanceID, NumAgentsInCurrentBatch, Agents.Num());
 }
 
 // ============================================================================

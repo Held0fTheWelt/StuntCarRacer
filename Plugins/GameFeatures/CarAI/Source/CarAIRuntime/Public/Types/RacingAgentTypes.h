@@ -158,15 +158,22 @@ struct FRacingObservation
 	/** Base observation size (without LIDAR). */
 	static constexpr int32 BASE_OBSERVATION_SIZE = 15;
 
+	/** Canonical NEAT path observation size. Must match Python num_inputs and contract observation_size. LIDAR is not supported in NEAT path. */
+	static constexpr int32 NEAT_OBSERVATION_SIZE = 15;
+
+	/**
+	 * Build flattened vector for general use. Appends LidarRays if non-empty.
+	 * For the NEAT path use BuildVectorForNEAT() so input size stays exactly NEAT_OBSERVATION_SIZE.
+	 */
 	void BuildVector()
 	{
 		Vector = {
-			// Vehicle State (4)
+			// Vehicle State (4): [0..3]
 			SpeedNorm,
 			YawRateNorm,
 			PitchRateNorm,
 			RollRateNorm,
-			// Adaptive Rays (8)
+			// Adaptive Rays (8): [4..11]
 			RayForward,
 			RayLeft,
 			RayRight,
@@ -175,16 +182,40 @@ struct FRacingObservation
 			RayForwardUp,
 			RayForwardDown,
 			RayGroundDist,
-			// IMU Gravity (3)
+			// IMU Gravity (3): [12..14]
 			GravityX,
 			GravityY,
 			GravityZ
 		};
-		// Append optional LIDAR ring rays
 		if (LidarRays.Num() > 0)
 		{
 			Vector.Append(LidarRays);
 		}
+	}
+
+	/**
+	 * Build exactly NEAT_OBSERVATION_SIZE elements for the NEAT path. Same order as BuildVector() base.
+	 * Does not append LIDAR; optional sensors are not supported in the NEAT contract.
+	 */
+	void BuildVectorForNEAT()
+	{
+		Vector = {
+			SpeedNorm,
+			YawRateNorm,
+			PitchRateNorm,
+			RollRateNorm,
+			RayForward,
+			RayLeft,
+			RayRight,
+			RayLeft45,
+			RayRight45,
+			RayForwardUp,
+			RayForwardDown,
+			RayGroundDist,
+			GravityX,
+			GravityY,
+			GravityZ
+		};
 	}
 };
 
@@ -370,6 +401,11 @@ struct FEpisodeStats
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	FDateTime StartTime;
+
+	/** Stable instance ID of the agent component that produced this episode (from UObject::GetUniqueID()).
+	 *  Used by NEATTrainingManager for unambiguous fitness attribution. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	int32 AgentInstanceID = -1;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	FDateTime EndTime;
