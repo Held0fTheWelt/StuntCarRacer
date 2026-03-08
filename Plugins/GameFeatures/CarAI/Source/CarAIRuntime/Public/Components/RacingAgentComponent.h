@@ -43,10 +43,12 @@ class UPolicyBackend;
  *                         Initialize() may now be called; stepping begins once called.
  *   Evaluating:           Initialize() has been called; TickComponent runs StepOnce() each tick.
  *
- * Hard guards:
+ * Hard guards (agent lifecycle / evaluation authorization gate):
  *   - TickComponent() early-outs unless RuntimeState is EvaluationAuthorized or Evaluating.
  *   - StepOnce() will not run a NEAT evaluation step unless GenomeID >= 0 and HasNEATPolicyBackend().
  *   - Registering the agent (MarkRegistered) does NOT grant evaluation authorization.
+ *   - GrantEvaluationAuthorization() is only valid when GenomeID >= 0 and HasNEATPolicyBackend(); the manager assigns both before authorizing.
+ *   - In the training path, no reward, episode start, or fallback drive can occur before authorization; GenomeID=-1 fallback-driving is impossible once authorized (NEAT path uses zero action if no backend).
  *   - Authorization is revoked on ForceEpisodeDone, ResetToIdle, and PIE end.
  *
  * Policy: NEAT evaluation (GenomeID >= 0) uses only PolicyBackend; no fallback to PolicyNetwork or
