@@ -306,6 +306,22 @@ void URacingAgentComponent::ResetEpisode()
 
 	UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Episode reset. RuntimeState=%d GenomeID=%d. Stepping begins this tick."),
 		*GetAgentLogId(), (int32)RuntimeState, GenomeID);
+
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Config dump: Grace=%.1fs StuckSpeedNorm=%.3f StuckSec=%.1f AirborneSec=%.1f GapTerminal=%.3f CollisionTerminal=%.3f SpawnLateralMax=%.0fcm SpawnHeight=%.0fcm SpawnDistAlongTrack=%.0fcm ForcedForward=%s ForcedForwardDur=%.1fs DiagSuppressCm=%.0f MaxSteps=%d"),
+		*GetAgentLogId(),
+		RewardCfg.GraceSecondsAfterReset,
+		RewardCfg.StuckSpeedNorm,
+		RewardCfg.StuckTimeSeconds,
+		RewardCfg.AirborneMaxSeconds,
+		RewardCfg.GapTerminalThreshold,
+		RewardCfg.CollisionTerminalThreshold,
+		SpawnLateralOffsetMaxCm,
+		SpawnHeightOffsetCm,
+		SpawnDistanceAlongTrackCm,
+		bEnableForcedForwardDiagnostic ? TEXT("ON") : TEXT("OFF"),
+		ForcedForwardDiagnosticDuration,
+		DiagnosticOfftrackSuppressProgressCm,
+		RewardCfg.MaxEpisodeSteps);
 }
 
 void URacingAgentComponent::ResetEpisodeAccumulators()
