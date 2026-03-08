@@ -46,6 +46,12 @@ struct FNEATTrainingContract
 	static inline const TCHAR* ManifestFileName = TEXT("neat_contract.json");
 	/** Parent dir for manifest and NEAT subdirs (relative to ProjectSavedDir). */
 	static inline const TCHAR* TrainingDirName = TEXT("Training");
+	/**
+	 * Canonical state file written by Python after every generation export (genome_dir/training_state.json).
+	 * Contains exported_generation: the generation index Python just exported for Unreal to load.
+	 * Unreal reads this to synchronize CurrentGeneration before calling LoadGenerationGenomes().
+	 */
+	static inline const TCHAR* TrainingStateFileName = TEXT("training_state.json");
 };
 
 /**
@@ -207,6 +213,13 @@ protected:
 
 	/** Load best genome for inference */
 	bool LoadBestGenome();
+
+	/**
+	 * Read the exported generation from training_state.json written by Python after each export.
+	 * Returns the exported_generation value, or -1 on any failure (file missing, parse error, field absent).
+	 * This is the canonical source of truth for which generation Unreal must load next.
+	 */
+	int32 ReadExportedGeneration() const;
 
 	/**
 	 * Finalize best-genome artifact from the last evaluated generation's fitness file,

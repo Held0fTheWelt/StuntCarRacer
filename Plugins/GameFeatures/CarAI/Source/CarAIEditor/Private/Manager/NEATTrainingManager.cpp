@@ -773,6 +773,43 @@ void UNEATTrainingManager::TriggerPythonEvolution()
 	PythonExecutor->ExecuteTrainingAsync(PythonScriptPath, PythonExecutable, ManifestPath);
 }
 
+int32 UNEATTrainingManager::ReadExportedGeneration() const
+{
+	const FNEATTrainingContract Contract = GetResolvedContract();
+	const FString StatePath = FPaths::Combine(Contract.GenomeDir, FNEATTrainingContract::TrainingStateFileName);
+
+	if (!FPaths::FileExists(StatePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json not found: %s. Python must write this file after every generation export."), *StatePath);
+		return -1;
+	}
+
+	FString JsonString;
+	if (!FFileHelper::LoadFileToString(JsonString, *StatePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to read training_state.json: %s"), *StatePath);
+		return -1;
+	}
+
+	TSharedPtr<FJsonObject> Obj;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to parse training_state.json: %s"), *StatePath);
+		return -1;
+	}
+
+	if (!Obj->HasField(TEXT("exported_generation")))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json missing 'exported_generation' field: %s"), *StatePath);
+		return -1;
+	}
+
+	const int32 ExportedGen = Obj->GetIntegerField(TEXT("exported_generation"));
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] training_state.json: exported_generation=%d (path=%s)"), ExportedGen, *StatePath);
+	return ExportedGen;
+}
+
 void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 {
 	bWaitingForPython = false;
@@ -785,6 +822,29 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python evolution complete"));
+
+	// Synchronize CurrentGeneration from training_state.json written by Python.
+	// This is the canonical source of truth for which generation Python just exported.
+	// Without this sync, Unreal would use its own CurrentGeneration (which starts at 0
+	// at every session), causing resume runs to load the wrong generation.
+	{
+		const int32 ExportedGen = ReadExportedGeneration();
+		if (ExportedGen < 0)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json is missing or invalid; cannot determine exported generation. Stopping training."));
+			StopTraining();
+			return;
+		}
+		if (ExportedGen != CurrentGeneration)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration %d -> %d (from training_state.json; likely a resumed run)"), CurrentGeneration, ExportedGen);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration=%d matches exported_generation=%d (no correction needed)"), CurrentGeneration, ExportedGen);
+		}
+		CurrentGeneration = ExportedGen;
+	}
 
 	// Load new genomes (validation: missing files, observation/action size, activation)
 	if (!LoadGenerationGenomes())

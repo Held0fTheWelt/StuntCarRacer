@@ -318,6 +318,22 @@ class GenomeExporter:
             print(f"💾 Exported genome {genome_id} to: {output_file.name}")
 
 
+TRAINING_STATE_FILENAME = "training_state.json"
+
+
+def write_training_state(genome_dir: Path, exported_generation: int) -> None:
+    """
+    Write training_state.json to genome_dir after every generation export.
+    Unreal reads exported_generation from this file to synchronize CurrentGeneration
+    before calling LoadGenerationGenomes(). This is the canonical source of truth
+    for which generation Python just exported.
+    """
+    state_file = genome_dir / TRAINING_STATE_FILENAME
+    with open(state_file, "w") as f:
+        json.dump({"exported_generation": exported_generation}, f, indent=2)
+    print(f"[NEAT] Training state written: {state_file} (exported_generation={exported_generation})")
+
+
 def export_population_for_unreal(
     population: neat.Population,
     config: neat.Config,
@@ -434,6 +450,10 @@ def main():
         if best_genome_path_val and Path(best_genome_path_val).is_file():
             Path(best_genome_path_val).unlink()
             print(f"[NEAT] Fresh mode: deleted best genome {best_genome_path_val}")
+        state_file = checkpoint_dir_path / TRAINING_STATE_FILENAME
+        if state_file.is_file():
+            state_file.unlink()
+            print(f"[NEAT] Fresh mode: deleted training state {state_file}")
     elif training_mode == "resume":
         print(f"[NEAT] Resume mode: will load checkpoint if found at {checkpoint_path}")
     else:
@@ -453,6 +473,7 @@ def main():
         print(f"[NEAT] Number of genomes exported: {len(population.population)}")
         save_checkpoint(checkpoint_path, population, config, 0)
         print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation=0)")
+        write_training_state(genome_dir_path, 0)
         return
 
     # Resume: load checkpoint, load fitness for last_exported generation, run one reproduction, export next gen
@@ -496,6 +517,7 @@ def main():
     print(f"[NEAT] Number of genomes exported: {len(population.population)}")
     save_checkpoint(checkpoint_path, population, config, next_gen)
     print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation={next_gen})")
+    write_training_state(genome_dir_path, next_gen)
 
     # Export pre-reproduction best genome to best_genome_path from contract
     best_genome_path = contract["best_genome_path"]
