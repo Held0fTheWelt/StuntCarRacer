@@ -1,5 +1,6 @@
 #include "CarAIEditor.h"
 #include "UI/NeatTrainingEditorWidget.h"
+#include "Logging.h"
 
 #include "Editor.h"
 #include "LevelEditor.h"
@@ -19,6 +20,9 @@ FCarAIEditor& FCarAIEditor::Get()
 
 void FCarAIEditor::StartupModule()
 {
+	// Identify running build so we can confirm behavior comes from current source (see BUILD.md).
+	UE_LOG(LogCarAIEditor, Display, TEXT("[CarAI] CarAIEditor module loaded (plugin source build)."));
+
 	// Soft references resolved at open-time to avoid loading assets at startup.
 	CurriculumWidget = TSoftObjectPtr<UEditorUtilityWidgetBlueprint>(
 		FSoftObjectPath(TEXT("/CarAI/Editor/EUW_AICarCurriculum.EUW_AICarCurriculum"))
