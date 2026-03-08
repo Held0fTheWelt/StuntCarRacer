@@ -8,35 +8,34 @@ public class CarAIEditor : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] 
+		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
 			"CoreUObject",
 			"Engine",
-			"UnrealEd",
-			"Blutility",
-			"UMG",
-			"UMGEditor",
-			"EditorSubsystem",
 		});
-		
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Slate",
 				"SlateCore",
+				"UnrealEd",
+				"Blutility",
+				"UMG",
+				"UMGEditor",
+				"EditorSubsystem",
 				"EditorFramework",
 				"ToolMenus",
 				"LevelEditor",
 				"InputCore",
 				"Projects",
-				"Blutility",
 				"Framework",
 				"Cars",
 				"JSON",
 				"CarAIRuntime",
-                "ChaosVehicles",
-            });
+				"ChaosVehicles",
+			});
 		
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
