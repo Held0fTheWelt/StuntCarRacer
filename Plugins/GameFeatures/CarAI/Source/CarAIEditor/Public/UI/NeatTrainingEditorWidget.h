@@ -20,6 +20,8 @@ enum class ENeatTrainingWorkflowState : uint8
 	ArmedForPIE,
 	WaitingForPIEWorld,
 	WaitingForRuntimeAgents,
+	RegisteringAgents,
+	ReadyToStart,
 	AgentsRegistered,
 	TrainingStarting,
 	TrainingRunning,
@@ -29,11 +31,14 @@ enum class ENeatTrainingWorkflowState : uint8
 };
 
 /**
- * Editor Utility Widget C++ base for the NEAT training control surface.
+ * Real Editor Utility Widget (C++ base) for the NEAT training control surface.
+ * This is the single source of editor workflow; no placeholder or data-only widget.
  *
  * This class is the editor-facing control panel only. All training logic lives in
  * UNEATTrainingManager. The widget creates and holds a manager instance, exposes
  * config properties editable in the Details panel, and calls into the manager.
+ * Essential workflow (arm, discovery, registration, auto-start) is implemented here
+ * and in the manager; the Blueprint may add UI only.
  *
  * Blueprint asset: Content/Editor/EUW_NeatTraining.uasset
  * The Blueprint must be reparented to this class in the Unreal Editor.
@@ -186,8 +191,8 @@ private:
 	UPROPERTY()
 	TObjectPtr<UNEATTrainingManager> TrainingManager;
 
-	/** Set workflow state, log the transition, and update LastStatusMessage. */
-	void SetWorkflowState(ENeatTrainingWorkflowState NewState);
+	/** Set workflow state, log the transition (with optional reason), and update LastStatusMessage. */
+	void SetWorkflowState(ENeatTrainingWorkflowState NewState, const FString& Reason = FString());
 
 	/** Apply current widget config properties to the manager before training starts. */
 	void ApplyConfigToManager();
@@ -212,4 +217,11 @@ private:
 
 	static constexpr float AgentDiscoveryIntervalSeconds = 0.5f;
 	static constexpr float AgentDiscoveryMaxDurationSeconds = 30.0f;
+
+	/** Poll index since discovery started; incremented each PollForRuntimeAgents tick. Used for structured logs. */
+	int32 AgentDiscoveryPollIndex = 0;
+
+	/** Verbosity for workflow/poll logs: 0=Error/Warning only, 1=+Display (transitions), 2=+Log (per-poll), 3=+Verbose (per-component skip). */
+	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "0", ClampMax = "3"))
+	int32 WorkflowLogVerbosity = 2;
 };
