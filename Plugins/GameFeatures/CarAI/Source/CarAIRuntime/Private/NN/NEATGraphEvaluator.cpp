@@ -48,14 +48,24 @@ bool UNEATGraphEvaluator::BuildFromGenome(const FNEATGenome& Genome)
 
 	if (!Genome.bIsValid || Genome.Nodes.Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome: genome invalid or empty"));
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome FAIL: genome invalid or empty (genome_id=%d)"), Genome.GenomeID);
 		return false;
 	}
 
 	if (Genome.NumOutputs != 3)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome: expected 3 outputs, got %d"), Genome.NumOutputs);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome FAIL: expected 3 outputs (steer, throttle, brake), got %d"), Genome.NumOutputs);
 		return false;
+	}
+
+	// Reject any node with unsupported (Invalid) activation
+	for (const FNEATNode& N : Genome.Nodes)
+	{
+		if (N.Activation == ENEATActivation::Invalid)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome FAIL: node %d has Invalid activation (genome_id=%d)"), N.NodeId, Genome.GenomeID);
+			return false;
+		}
 	}
 
 	// Build node set and in-degree (enabled connections only)
@@ -101,7 +111,7 @@ bool UNEATGraphEvaluator::BuildFromGenome(const FNEATGenome& Genome)
 
 	if (Order.Num() != Genome.Nodes.Num())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome: cycle detected (ordered %d of %d nodes)"),
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] BuildFromGenome FAIL: cycle detected (ordered %d of %d nodes); only acyclic feed-forward supported"),
 			Order.Num(), Genome.Nodes.Num());
 		return false;
 	}
@@ -143,7 +153,7 @@ bool UNEATGraphEvaluator::BuildFromGenome(const FNEATGenome& Genome)
 	}
 
 	bCompiled = true;
-	UE_LOG(LogTemp, Log, TEXT("[NEATGraphEvaluator] Compiled graph: genome_id=%d inputs=%d outputs=%d nodes=%d topo_order=%d"),
+	UE_LOG(LogTemp, Log, TEXT("[NEATGraphEvaluator] Graph compilation summary: genome_id=%d | inputs=%d outputs=%d (steer, throttle, brake) | nodes=%d topo_order=%d | feed-forward acyclic"),
 		Genome.GenomeID, ExpectedInputCount, ExpectedOutputCount, Genome.Nodes.Num(), TopoOrder.Num());
 	return true;
 }
@@ -158,29 +168,29 @@ bool UNEATGraphEvaluator::Evaluate(const TArray<float>& Observation, TArray<floa
 
 	if (!bCompiled)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATGraphEvaluator] Evaluate: graph not compiled"));
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] Inference failed: graph not compiled"));
 		return false;
 	}
 
 	if (Observation.Num() != ExpectedInputCount)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] Evaluate: observation size %d does not match expected inputs %d"),
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] Inference failed: observation size %d does not match expected input count %d"),
 			Observation.Num(), ExpectedInputCount);
 		return false;
 	}
 
 	ValueMap.Empty();
 
-	// Set input node values by node id (NEAT convention: input nodes 0..NumInputs-1)
+	// Set input node values (NEAT convention: input nodes 0..NumInputs-1)
 	for (int32 i = 0; i < ExpectedInputCount; ++i)
 	{
 		ValueMap.Add(i, Observation[i]);
 	}
 
-	// Evaluate non-input nodes in topological order (input values already set)
+	// Feed-forward: evaluate non-input nodes in topological order
 	for (const FNEATCompiledNode& Comp : CompiledNodes)
 	{
-		if (Comp.NodeId < ExpectedInputCount) continue; // already set from observation
+		if (Comp.NodeId < ExpectedInputCount) continue;
 		float Sum = 0.f;
 		for (const FNEATCompiledInput& Inp : Comp.Inputs)
 		{
@@ -192,13 +202,19 @@ bool UNEATGraphEvaluator::Evaluate(const TArray<float>& Observation, TArray<floa
 		ValueMap.Add(Comp.NodeId, Y);
 	}
 
-	// Read 3 outputs (node ids NumInputs, NumInputs+1, NumInputs+2)
+	// Read 3 outputs (node ids NumInputs, NumInputs+1, NumInputs+2); fail if any output node missing (disconnected)
 	const int32 OutBase = ExpectedInputCount;
 	OutActions.SetNum(3);
 	for (int32 k = 0; k < 3; ++k)
 	{
 		const float* V = ValueMap.Find(OutBase + k);
-		OutActions[k] = V ? *V : 0.f;
+		if (!V)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] Inference failed: output node %d (index %d) not computed; graph may have disconnected output"),
+				OutBase + k, k);
+			return false;
+		}
+		OutActions[k] = *V;
 	}
 
 	return true;
@@ -212,10 +228,17 @@ UNEATGraphEvaluator* UNEATGraphEvaluator::CreateFromGenome(UObject* WorldContext
 {
 	UObject* Outer = WorldContextObject ? WorldContextObject : GetTransientPackage();
 	UNEATGraphEvaluator* Eval = NewObject<UNEATGraphEvaluator>(Outer);
-	if (!Eval || !Eval->BuildFromGenome(Genome))
+	if (!Eval)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] CreateFromGenome failed for genome_id=%d"), Genome.GenomeID);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] CreateFromGenome failed: could not create evaluator object"));
 		return nullptr;
 	}
+	if (!Eval->BuildFromGenome(Genome))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] CreateFromGenome failed for genome_id=%d (see BuildFromGenome logs above)"), Genome.GenomeID);
+		return nullptr;
+	}
+	UE_LOG(LogTemp, Log, TEXT("[NEATGraphEvaluator] NEAT runtime backend ready: genome_id=%d input_count=%d output_count=3"),
+		Genome.GenomeID, Eval->GetExpectedInputCount());
 	return Eval;
 }

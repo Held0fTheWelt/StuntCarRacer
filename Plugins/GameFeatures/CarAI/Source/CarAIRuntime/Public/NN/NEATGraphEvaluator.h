@@ -28,9 +28,12 @@ struct FNEATCompiledNode
 };
 
 /**
- * Feed-forward NEAT graph evaluator. Compiles a validated FNEATGenome into an acyclic
- * execution order; runs activation(bias + response * sum(weight * in)) per node.
- * Produces exactly 3 outputs (steer, throttle, brake); agent clamps at use site.
+ * Dedicated NEAT runtime inference backend. Compiles a validated FNEATGenome into an
+ * acyclic feed-forward execution graph; runs deterministic inference:
+ *   value = activation(bias + response * sum(weight * input_value)) per node in topological order.
+ * Produces exactly 3 raw outputs (steer, throttle, brake); the agent layer clamps them
+ * (not inside this evaluator). Observation size is validated before inference; invalid
+ * size or unsupported graph (e.g. cycle, disconnected output) fails with a clear log.
  */
 UCLASS()
 class CARAIRUNTIME_API UNEATGraphEvaluator : public UPolicyBackend
