@@ -10,11 +10,11 @@ NEAT directories or fallbacks.
 
 Workflow:
 1. Load contract from Unreal (fitness_dir, genome_dir, checkpoint_dir, best_genome_path, observation_size, action_size)
-2. Load fitness values from contract fitness_dir
-3. NEAT evolves genomes; export to contract genome_dir
-4. Unreal loads genomes and repeats
+2. If checkpoint exists: resume population and last_exported_generation; load fitness for that generation; evolve once; export next generation.
+3. If no checkpoint: fresh start; create population; export generation_0; save checkpoint.
+4. Unreal loads the exported generation file, evaluates, writes fitness, then calls Python again. Generation numbering is sequential (0, 1, 2, ...) and aligned with Unreal's expected filenames.
 
-File naming (must match Unreal): generation_{N}.json, generation_{N}_genomes.json, genome_{id}.json, best_genome.json
+File naming (must match Unreal): generation_{N}.json (fitness), generation_{N}_genomes.json (list), genome_{id}.json, best_genome.json. Checkpoint: neat_checkpoint_latest.pkl in checkpoint_dir.
 
 Requirements:
     pip install neat-python
@@ -126,30 +126,55 @@ survival_threshold = 0.2
 """.format(obs_size=obs_size, action_size=action_size)
 
 # ============================================================================
-# Checkpoint (deterministic filename, one file per contract)
+# Checkpoint (deterministic filename; one file per contract dir; enables resume)
 # ============================================================================
 
 CHECKPOINT_FILENAME = "neat_checkpoint_latest.pkl"
 
 
-def find_checkpoint(checkpoint_dir: str) -> Optional[Path]:
-    """Return path to the single checkpoint file if it exists, else None."""
-    path = Path(checkpoint_dir) / CHECKPOINT_FILENAME
-    return path if path.is_file() else None
+def get_checkpoint_path(checkpoint_dir: Path) -> Path:
+    """Return the canonical checkpoint file path. Does not check existence."""
+    return checkpoint_dir / CHECKPOINT_FILENAME
 
 
-def load_checkpoint(checkpoint_path: Path) -> Tuple[neat.Population, neat.Config, int]:
-    """Load (population, config, last_exported_unreal_generation). Raises on failure."""
+def find_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
+    """Return path to the checkpoint file if it exists, else None. Logs path checked."""
+    path = get_checkpoint_path(checkpoint_dir)
+    if path.is_file():
+        return path
+    return None
+
+
+def load_checkpoint(
+    checkpoint_path: Path,
+    expected_inputs: int,
+    expected_outputs: int,
+) -> Tuple[neat.Population, neat.Config, int]:
+    """
+    Load (population, config, last_exported_unreal_generation).
+    Validates checkpoint format and that config matches contract observation/action size.
+    Raises on failure.
+    """
     with open(checkpoint_path, "rb") as f:
         data = pickle.load(f)
     if len(data) != 3:
         raise ValueError(f"Checkpoint has wrong format: expected 3 items, got {len(data)}")
     population, config, last_exported = data[0], data[1], int(data[2])
+    if config.genome_config.num_inputs != expected_inputs or config.genome_config.num_outputs != expected_outputs:
+        raise ValueError(
+            f"Checkpoint config mismatch: checkpoint has num_inputs={config.genome_config.num_inputs} "
+            f"num_outputs={config.genome_config.num_outputs}, contract expects {expected_inputs} / {expected_outputs}"
+        )
     return population, config, last_exported
 
 
-def save_checkpoint(checkpoint_path: Path, population: neat.Population, config: neat.Config, last_exported_unreal_gen: int) -> None:
-    """Save checkpoint so the next run can resume."""
+def save_checkpoint(
+    checkpoint_path: Path,
+    population: neat.Population,
+    config: neat.Config,
+    last_exported_unreal_gen: int,
+) -> None:
+    """Save checkpoint so the next run can resume from this generation."""
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     with open(checkpoint_path, "wb") as f:
         pickle.dump((population, config, last_exported_unreal_gen), f)
@@ -373,24 +398,32 @@ def main():
         str(config_path),
     )
 
-    checkpoint_path = find_checkpoint(checkpoint_dir)
+    # Single canonical checkpoint path (contract checkpoint_dir + fixed filename)
+    checkpoint_path = get_checkpoint_path(checkpoint_dir_path)
+    resolved_checkpoint = find_checkpoint(checkpoint_dir_path)
 
-    if checkpoint_path is None:
-        # Fresh start: create initial population, export generation_0 for Unreal, save checkpoint
-        print("[NEAT] Fresh start: no checkpoint found.")
+    if resolved_checkpoint is None:
+        # Fresh start: no checkpoint exists; create initial population, export generation_0, save checkpoint
+        print(f"[NEAT] Fresh start: no checkpoint at {checkpoint_path}")
         population = neat.Population(config)
         population.add_reporter(neat.StdOutReporter(True))
         export_population_for_unreal(population, config, genome_dir_path, 0)
-        save_checkpoint(checkpoint_dir_path / CHECKPOINT_FILENAME, population, config, 0)
-        print(f"[NEAT] Exported generation file: {genome_dir_path / 'generation_0_genomes.json'}")
+        list_path_0 = genome_dir_path / "generation_0_genomes.json"
+        print(f"[NEAT] Exported generation file: {list_path_0} (generation 0 for Unreal to evaluate)")
         print(f"[NEAT] Number of genomes exported: {len(population.population)}")
-        print(f"[NEAT] Checkpoint saved: {checkpoint_dir_path / CHECKPOINT_FILENAME}")
+        save_checkpoint(checkpoint_path, population, config, 0)
+        print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation=0)")
         return
 
-    # Resume: load checkpoint, assign fitness for that generation, run one reproduction, export next gen
-    print(f"[NEAT] Resumed run: checkpoint file used: {checkpoint_path}")
-    population, config, last_exported = load_checkpoint(checkpoint_path)
-    print(f"[NEAT] Resumed checkpoint: last exported Unreal generation = {last_exported}")
+    # Resume: load checkpoint, load fitness for last_exported generation, run one reproduction, export next gen
+    print(f"[NEAT] Resumed run: checkpoint found at {resolved_checkpoint}")
+    try:
+        population, config, last_exported = load_checkpoint(resolved_checkpoint, obs_size, action_size)
+    except (ValueError, OSError) as e:
+        print(f"ERROR: Failed to load checkpoint: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[NEAT] Checkpoint used: {resolved_checkpoint} (last_exported_generation={last_exported})")
+    print(f"[NEAT] Resumed generation: {last_exported} (will load fitness for this generation, then export {last_exported + 1})")
 
     fitness_loader = FitnessLoader(fitness_dir)
     fitness_map = fitness_loader.load_for_generation(last_exported)
@@ -410,17 +443,16 @@ def main():
     population.run(eval_only_assign, 1)
     next_gen = last_exported + 1
 
-    # Best genome summary (after reproduction)
     best_id = max(population.population.keys(), key=lambda gid: population.population[gid].fitness)
     best_fitness = population.population[best_id].fitness
     print(f"[NEAT] Best genome summary: genome_id={best_id} fitness={best_fitness:.2f}")
 
     export_population_for_unreal(population, config, genome_dir_path, next_gen)
     list_path = genome_dir_path / f"generation_{next_gen}_genomes.json"
-    print(f"[NEAT] Exported generation file: {list_path}")
+    print(f"[NEAT] Exported generation file: {list_path} (generation {next_gen} for Unreal to evaluate)")
     print(f"[NEAT] Number of genomes exported: {len(population.population)}")
-    save_checkpoint(checkpoint_dir_path / CHECKPOINT_FILENAME, population, config, next_gen)
-    print(f"[NEAT] Checkpoint saved (Unreal generation {next_gen}).")
+    save_checkpoint(checkpoint_path, population, config, next_gen)
+    print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation={next_gen})")
 
 
 if __name__ == "__main__":
