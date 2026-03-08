@@ -428,7 +428,7 @@ void URacingAgentComponent::LogOffTrackDiagnostics(float RayGroundDistNorm)
 	FHitResult GroundHit;
 	const bool bGroundRayHit = GetWorld()->LineTraceSingleByChannel(
 		GroundHit, GroundStart, GroundEnd, ECC_Visibility,
-		FCollisionQueryParams(TEXT("OfftrackDiag"), false, Vehicle)
+		BuildTraceIgnoreParams(TEXT("OfftrackDiag"))
 	);
 	const float GroundDistCm = bGroundRayHit ? (GroundHit.ImpactPoint - GroundStart).Size() : GroundRayMaxDistanceCm;
 
@@ -879,7 +879,7 @@ FRacingObservation URacingAgentComponent::BuildObservation()
 	FHitResult GroundHit;
 	bool bHasGround = GetWorld()->LineTraceSingleByChannel(
 		GroundHit, GroundStart, GroundEnd, ECC_Visibility,
-		FCollisionQueryParams(TEXT("GroundCheck"), false, Vehicle)
+		BuildTraceIgnoreParams(TEXT("GroundCheck"))
 	);
 
 	// RayGroundDist semantics: downstream treats high = grounded/safe, low = offtrack/airborne/danger.
@@ -947,6 +947,49 @@ FRacingObservation URacingAgentComponent::BuildObservation()
 }
 
 // ============================================================================
+// Trace Ignore Params
+// ============================================================================
+
+FCollisionQueryParams URacingAgentComponent::BuildTraceIgnoreParams(const FName& TraceTag) const
+{
+    FCollisionQueryParams Params(TraceTag, false);
+
+    // Always ignore own vehicle.
+    if (AActor* OwnVehicle = GetVehicleActor())
+    {
+        Params.AddIgnoredActor(OwnVehicle);
+    }
+
+    // Ignore all other registered agent vehicles to prevent trace contamination.
+    UWorld* World = GetWorld();
+    if (World)
+    {
+        if (URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>())
+        {
+            for (URacingAgentComponent* OtherAgent : Registry->GetRegisteredAgents())
+            {
+                if (OtherAgent && OtherAgent != this)
+                {
+                    if (AActor* OtherVehicle = OtherAgent->GetVehicleActor())
+                    {
+                        Params.AddIgnoredActor(OtherVehicle);
+                    }
+                }
+            }
+        }
+    }
+
+    if (bDrawRayDebug)
+    {
+        const int32 IgnoredCount = Params.GetIgnoredActors().Num();
+        UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Trace '%s': ignoring %d actors (own + %d other agents)"),
+            *GetAgentLogId(), *TraceTag.ToString(), IgnoredCount, IgnoredCount > 0 ? IgnoredCount - 1 : 0);
+    }
+
+    return Params;
+}
+
+// ============================================================================
 // Adaptive Ray Tracing
 // ============================================================================
 
@@ -969,7 +1012,7 @@ float URacingAgentComponent::TraceAdaptiveRay(
 		Start,
 		End,
 		RayTraceChannel,
-		FCollisionQueryParams(TEXT("AdaptiveRay"), false, GetVehicleActor())
+		BuildTraceIgnoreParams(TEXT("AdaptiveRay"))
 	);
 
 	float HitDistNorm = 1.f;
@@ -1007,7 +1050,7 @@ float URacingAgentComponent::TraceFixedRay(
 		Start,
 		End,
 		RayTraceChannel,
-		FCollisionQueryParams(TEXT("FixedRay"), false, GetVehicleActor())
+		BuildTraceIgnoreParams(TEXT("FixedRay"))
 	);
 
 	if (bDrawRayDebug)
@@ -1219,41 +1262,57 @@ float URacingAgentComponent::GetEpisodeFitness() const
 
 bool URacingAgentComponent::CheckTerminalConditions(const FRacingObservation& Obs, float DeltaTime, FString& OutReason)
 {
-	// Max steps
+	// Max steps — never suppressed.
 	if (EpisodeStepCount >= RewardCfg.MaxEpisodeSteps)
 	{
 		OutReason = TEXT("MaxSteps");
 		return true;
 	}
 
-	// Airborne too long
-	if (Obs.RayGroundDist < 0.1f)
+	// Airborne too long — suppressed during grace window (spawn bounce artifact).
+	if (EpisodeGraceTimeRemaining <= 0.f)
 	{
-		AirborneTimeAccum += DeltaTime;
-		if (AirborneTimeAccum >= RewardCfg.AirborneMaxSeconds)
+		if (Obs.RayGroundDist < 0.1f)
 		{
-			OutReason = TEXT("AirborneLong");
-			return true;
+			AirborneTimeAccum += DeltaTime;
+			if (AirborneTimeAccum >= RewardCfg.AirborneMaxSeconds)
+			{
+				OutReason = TEXT("AirborneLong");
+				return true;
+			}
+		}
+		else
+		{
+			AirborneTimeAccum = 0.f;
 		}
 	}
 	else
 	{
-		AirborneTimeAccum = 0.f;
+		AirborneTimeAccum = 0.f; // Reset during grace so timer does not carry over.
 	}
 
-	// Stuck
-	if (Obs.SpeedNorm < RewardCfg.StuckSpeedNorm)
+	// Stuck — suppressed during grace window and during forced-forward diagnostic window.
+	const bool bStuckSuppressed = (EpisodeGraceTimeRemaining > 0.f) ||
+		(bEnableForcedForwardDiagnostic && EpisodeTimeAccum < ForcedForwardDiagnosticDuration);
+	if (!bStuckSuppressed)
 	{
-		StuckTimeAccum += DeltaTime;
-		if (StuckTimeAccum >= RewardCfg.StuckTimeSeconds)
+		if (Obs.SpeedNorm < RewardCfg.StuckSpeedNorm)
 		{
-			OutReason = TEXT("Stuck");
-			return true;
+			StuckTimeAccum += DeltaTime;
+			if (StuckTimeAccum >= RewardCfg.StuckTimeSeconds)
+			{
+				OutReason = TEXT("Stuck");
+				return true;
+			}
+		}
+		else
+		{
+			StuckTimeAccum = 0.f;
 		}
 	}
 	else
 	{
-		StuckTimeAccum = 0.f;
+		StuckTimeAccum = 0.f; // Reset during suppressed window so it starts fresh after grace.
 	}
 
 	return false;

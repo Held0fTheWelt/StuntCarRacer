@@ -282,6 +282,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Racing|Spawning")
 	float SpawnHeightOffsetCm = 50.f;
 
+	/** When a track spline is available, spawn distance along spline (cm). 0 = start of spline. Ignored if no spline. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Spawning")
+	float SpawnDistanceAlongTrackCm = 0.f;
+
 	UPROPERTY(EditAnywhere, Category = "Racing|Spawning")
 	int32 SpawnRandomSeed = 0;
 
@@ -300,6 +304,26 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Racing|Debug")
 	bool bDrawObservationHUD = false;
+
+	/** Diagnostic: for the first N seconds of each episode, bypass NEAT and force Steer=0, Throttle=0.3, Brake=0 to verify the vehicle can drive forward. Disable after diagnosis. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Debug|Forced-Forward Diagnostic")
+	bool bEnableForcedForwardDiagnostic = false;
+
+	/** Duration (seconds) of the forced-forward diagnostic window. After this, normal NEAT control resumes. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Debug|Forced-Forward Diagnostic", meta = (EditCondition = "bEnableForcedForwardDiagnostic", ClampMin = "0.5", ClampMax = "10.0"))
+	float ForcedForwardDiagnosticDuration = 2.0f;
+
+	/** Throttle applied during forced-forward diagnostic (0.30 = gentle, 1.00 = full). Use 1.00 to prove vehicle can drive. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Debug|Forced-Forward Diagnostic", meta = (EditCondition = "bEnableForcedForwardDiagnostic", ClampMin = "0.0", ClampMax = "1.0"))
+	float ForcedForwardDiagnosticThrottle = 1.00f;
+
+	/** When diagnostic is on: suppress off-track termination until travelled this many cm (and grounded for several frames). Lets forced-forward phase complete. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Debug|Forced-Forward Diagnostic", meta = (EditCondition = "bEnableForcedForwardDiagnostic", ClampMin = "0", ClampMax = "5000"))
+	float DiagnosticOfftrackSuppressProgressCm = 200.f;
+
+	/** When diagnostic is on: spawn height override (cm). 0 = no lift (snap to ground level). Reduces false off-track from spawn lift. */
+	UPROPERTY(EditAnywhere, Category = "Racing|Debug|Forced-Forward Diagnostic", meta = (EditCondition = "bEnableForcedForwardDiagnostic", ClampMin = "0", ClampMax = "200"))
+	float DiagnosticSpawnHeightOffsetCm = 0.f;
 
 	// ===== Events =====
 
@@ -345,12 +369,32 @@ protected:
 	/** Cached track spline for progress (resolved from world actor with tag "Track", IRoadSplineInterface). */
 	UPROPERTY() TWeakObjectPtr<USplineComponent> CachedTrackSpline;
 
+	/** Seconds remaining in the post-reset grace window (collision/offtrack ignored). Set at reset, decremented each step. */
+	UPROPERTY() float EpisodeGraceTimeRemaining = 0.f;
+	/** Log once per episode when grace protection ignores a collision/offtrack event. */
+	UPROPERTY() bool bHasLoggedGraceProtectionThisEpisode = false;
+
+	/** Forced-forward diagnostic: sum of signed forward speed (cm/s) during the diagnostic window (for average). */
+	UPROPERTY() float DiagnosticForwardSpeedSum = 0.f;
+	/** Forced-forward diagnostic: number of steps during the window (for average). */
+	UPROPERTY() int32 DiagnosticForcedStepCount = 0;
+	/** Forced-forward diagnostic: summary log emitted once per episode when window ends. */
+	UPROPERTY() bool bDiagnosticSummaryLoggedThisEpisode = false;
+
+	/** Consecutive frames with ground ray "grounded" (RayGroundDist >= 0.15). Used to suppress offtrack until settled. */
+	UPROPERTY() int32 GroundedFrameCount = 0;
+	/** Log once when diagnostic suppresses offtrack (progress/grounded gate). */
+	UPROPERTY() bool bHasLoggedDiagnosticOfftrackSuppressThisEpisode = false;
+
 	/** Log policy-missing once per episode to avoid spam */
 	UPROPERTY() bool bHasLoggedPolicyMissingThisEpisode = false;
 	/** Log NEAT observation schema once per episode */
 	UPROPERTY() bool bHasLoggedNEATSchemaThisEpisode = false;
 	/** Log once when skipping step because NEAT mode but no backend (readiness failure) */
 	UPROPERTY() bool bHasLoggedNEATNoBackendThisEpisode = false;
+
+	/** True when resolved car was obtained via CarInterface (Owner or possessed pawn). Used for logging. */
+	UPROPERTY() mutable bool bCarResolvedViaInterface = false;
 
 	// ===== Adaptive Ray State =====
 
@@ -376,11 +420,25 @@ protected:
 	UPROPERTY()
 	FVector SmoothedGravityLocal = FVector(0, 0, -1);
 
-	// ===== Helper Methods =====
+	// ===== Car resolution (CarInterface-driven; no direct Owner==vehicle assumption) =====
 
+	/** Resolves the actual car actor: via CarInterface on Owner or on possessed pawn, or legacy Owner-as-vehicle. Returns nullptr if unresolved. */
+	AActor* GetResolvedCarActor() const;
+	/** Root primitive of the resolved car (for physics/traces). Null if no valid car or no primitive root. */
+	UPrimitiveComponent* GetResolvedCarRootComponent() const;
+	/** Returns true if car was resolved via CarInterface (Owner or possessed pawn). */
+	bool IsCarResolvedViaInterface() const { return bCarResolvedViaInterface; }
+
+	/** Pre-evaluation validation: resolved car, root component, movement component. Returns false and logs if invalid. */
+	bool ValidateCarSetupForEvaluation(FString* OutFailureReason = nullptr) const;
+
+	// Legacy accessors: now delegate to resolved car (do not assume Owner is vehicle).
 	AActor* GetVehicleActor() const;
 	UPrimitiveComponent* GetVehicleRootComponent() const;
 	void ApplyAction(const FVehicleAction& Action);
+
+	/** Build ignore params that exclude this vehicle and all other active agent vehicles. */
+	FCollisionQueryParams BuildTraceIgnoreParams(const FName& TraceTag) const;
 
 	/** Trace adaptive ray with current pitch angle */
 	float TraceAdaptiveRay(
@@ -411,6 +469,10 @@ protected:
 	void ResetAdaptiveRays();
 
 	APlayerStart* FindPlayerStart() const;
+
+	/** If track spline is available, compute spawn location and rotation from spline (tangent-aligned). Returns true and sets OutLoc, OutRot; otherwise false. */
+	bool GetSpawnTransformFromTrack(FVector& OutLoc, FRotator& OutRot);
+
 	void ResetEpisodeAccumulators();
 	bool CheckTerminalConditions(const FRacingObservation& Obs, float DeltaTime, FString& OutReason);
 	void FinalizeEpisodeStats(const FString& TerminationReason);
@@ -418,6 +480,8 @@ protected:
 
 	/** Resolve track spline from world (actor tag "Track", IRoadSplineInterface). */
 	void EnsureTrackSpline();
+	/** Log decisive off-track diagnostics at termination: spline distance, lateral offset, wheel contact, ground ray, trigger condition. */
+	void LogOffTrackDiagnostics(float RayGroundDistNorm);
 	/** Compute progress delta this step (spline or path length), update Last* state. Returns cm. */
 	float GetProgressDeltaCmAndUpdate(const FVector& CurrentLoc);
 	/** Wrap progress delta for closed spline (shortest signed delta). */
