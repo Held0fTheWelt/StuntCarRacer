@@ -5,6 +5,26 @@
 #include "Types/RacingAgentTypes.h"
 #include "RacingAgentComponent.generated.h"
 
+/**
+ * Explicit runtime state for a RacingAgentComponent.
+ *
+ * Transitions (single direction, only manager may advance):
+ *   Idle -> Registered -> EvaluationAuthorized -> Evaluating
+ * Resets to Idle on PIE end, unregister, or ForceEpisodeDone.
+ */
+UENUM(BlueprintType)
+enum class EAgentRuntimeState : uint8
+{
+	/** Component attached; no registration, no stepping. Default after BeginPlay. */
+	Idle,
+	/** Registered with training manager. Still no stepping — awaiting genome assignment. */
+	Registered,
+	/** Genome assigned and evaluation authorized by the training workflow. Stepping may begin. */
+	EvaluationAuthorized,
+	/** Currently executing a training episode (stepping each tick). */
+	Evaluating,
+};
+
 class USplineComponent;
 class APlayerStart;
 class USimpleNeuralNetwork;
@@ -13,14 +33,21 @@ class UPolicyBackend;
 /**
  * Racing AI Agent with Adaptive Ray-based Vision and NEAT Evolution.
  *
- * Runtime stepping lifecycle (C++ deterministic path):
- * 1. Initialization: Constructor sets bAutoActivate = false; BeginPlay() sets up ray state only.
- * 2. Activation: Call Initialize() (or equivalent) to enter evaluation. Initialize() calls Activate(),
- *    SetComponentTickEnabled(true), and ResetEpisode(). This is the only way to start stepping.
- * 3. Evaluation-active state: After Initialize(), the component is active and ticking; each
- *    TickComponent() invokes StepOnce(DeltaTime) when the episode is not done.
- * 4. Repeated stepping: StepOnce() runs every tick (PrePhysics) until the episode terminates;
- *    then no further steps until ResetEpisode() is called (e.g. by the training manager).
+ * Runtime state machine (EAgentRuntimeState):
+ *   Idle -> Registered -> EvaluationAuthorized -> Evaluating
+ *
+ *   Idle:                 Component attached (BeginPlay). No stepping. No genome. No authorization.
+ *   Registered:           MarkRegistered() called by training manager. Still no stepping.
+ *                         No genome or policy backend assigned yet.
+ *   EvaluationAuthorized: GrantEvaluationAuthorization() called after genome+backend are valid.
+ *                         Initialize() may now be called; stepping begins once called.
+ *   Evaluating:           Initialize() has been called; TickComponent runs StepOnce() each tick.
+ *
+ * Hard guards:
+ *   - TickComponent() early-outs unless RuntimeState is EvaluationAuthorized or Evaluating.
+ *   - StepOnce() will not run a NEAT evaluation step unless GenomeID >= 0 and HasNEATPolicyBackend().
+ *   - Registering the agent (MarkRegistered) does NOT grant evaluation authorization.
+ *   - Authorization is revoked on ForceEpisodeDone, ResetToIdle, and PIE end.
  *
  * Policy: NEAT evaluation (GenomeID >= 0) uses only PolicyBackend; no fallback to PolicyNetwork or
  * drive-forward. Missing backend is logged and agent applies zero action. Non-NEAT (GenomeID < 0)
@@ -30,6 +57,10 @@ class UPolicyBackend;
  * fixed network, HasAnyPolicy() for either. No policy loaded = both false.
  *
  * Sensors: 8 Adaptive Rays + IMU + Vehicle State. Training: NEAT fitness = track progress (m) + speed bonus.
+ *
+ * Developer note: to see verbose lifecycle logs in PIE, add to DefaultEngine.ini:
+ *   [Core.Log]
+ *   LogCarAIAgent=Verbose
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class CARAIRUNTIME_API URacingAgentComponent : public UActorComponent
@@ -42,6 +73,7 @@ public:
 	// ===== Lifecycle =====
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
@@ -52,6 +84,45 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	void StepOnce(float DeltaTime);
+
+	// ===== Authorization Gate (MVP-RT-01) =====
+
+	/**
+	 * Grant evaluation authorization. Must only be called by the training manager after
+	 * a valid genome and policy backend have been assigned (GenomeID >= 0, HasNEATPolicyBackend()).
+	 * Transitions state: Registered -> EvaluationAuthorized.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void GrantEvaluationAuthorization();
+
+	/**
+	 * Revoke evaluation authorization. Transitions state back to Registered (or Idle if unregistered).
+	 * Called when PIE ends, the agent is unassigned, or training stops.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void RevokeEvaluationAuthorization();
+
+	/**
+	 * Mark the agent as registered with the training manager.
+	 * Transitions state: Idle -> Registered. Does NOT grant evaluation authorization.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void MarkRegistered();
+
+	/**
+	 * Reset the agent to idle state (Idle). Clears genome, policy, and authorization.
+	 * Called on unregister or PIE end.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	void ResetToIdle();
+
+	/** Current runtime state (Idle / Registered / EvaluationAuthorized / Evaluating). */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	EAgentRuntimeState GetRuntimeState() const { return RuntimeState; }
+
+	/** True only when evaluation authorization has been explicitly granted and a valid policy is present. */
+	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
+	bool IsEvaluationAuthorized() const { return RuntimeState == EAgentRuntimeState::EvaluationAuthorized || RuntimeState == EAgentRuntimeState::Evaluating; }
 
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	void SetNeuralNetwork(USimpleNeuralNetwork* Network);
@@ -240,6 +311,13 @@ public:
 
 protected:
 	// ===== Internal State =====
+
+	/** Explicit runtime state machine. Default: Idle after BeginPlay. Only manager advances this. */
+	UPROPERTY(VisibleAnywhere, Category = "Racing|Debug")
+	EAgentRuntimeState RuntimeState = EAgentRuntimeState::Idle;
+
+	/** Throttled log flag: emitted once when a step is skipped due to missing authorization. Reset each episode. */
+	UPROPERTY() bool bHasLoggedAuthSkipThisEpisode = false;
 
 	UPROPERTY() TObjectPtr<USimpleNeuralNetwork> PolicyNetwork;
 	UPROPERTY() TObjectPtr<UPolicyBackend> PolicyBackend;

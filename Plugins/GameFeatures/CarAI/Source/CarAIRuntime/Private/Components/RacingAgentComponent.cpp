@@ -1,6 +1,8 @@
 #include "Components/RacingAgentComponent.h"
+#include "CarAIRuntimeLogging.h"
 #include "NN/SimpleNeuralNetwork.h"
 #include "NN/NEATPolicyBackend.h"
+#include "Subsystems/RacingAgentRegistrySubsystem.h"
 
 #include "GameFramework/PlayerStart.h"
 #include "Kismet/GameplayStatics.h"
@@ -29,6 +31,9 @@ void URacingAgentComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Explicit idle state on attach: no genome, no authorization, no stepping.
+	RuntimeState = EAgentRuntimeState::Idle;
+
 	if (SpawnRandomSeed != 0)
 	{
 		SpawnRng.Initialize(SpawnRandomSeed);
@@ -53,20 +58,61 @@ void URacingAgentComponent::BeginPlay()
 
 	RayState_Right45.AdaptationRate = RayAdaptationRate;
 	RayState_Right45.TargetDistNorm = RayTargetDistNorm;
+
+	// Self-register with runtime registry so the editor can discover agents without world-scanning.
+	if (UWorld* World = GetWorld())
+	{
+		if (URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>())
+		{
+			Registry->RegisterAgent(this);
+		}
+		else
+		{
+			UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] No RacingAgentRegistrySubsystem in world; skipping self-registration."), *GetAgentLogId());
+		}
+	}
+
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Component attached (BeginPlay). RuntimeState=Idle. Awaiting registration and genome assignment."), *GetAgentLogId());
+}
+
+void URacingAgentComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>())
+		{
+			Registry->UnregisterAgent(this);
+		}
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void URacingAgentComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// NEAT evaluation: do not step until a policy backend is assigned (no stepping with GenomeID >= 0 and no backend).
-	const bool bNEATModeWithoutBackend = (GenomeID >= 0 && !HasNEATPolicyBackend());
-	if (bNEATModeWithoutBackend)
+	// Hard authorization gate: stepping requires EvaluationAuthorized or Evaluating state.
+	// Agents in Idle or Registered state must not step — regardless of activation or genome state.
+	if (RuntimeState != EAgentRuntimeState::EvaluationAuthorized && RuntimeState != EAgentRuntimeState::Evaluating)
+	{
+		if (!bHasLoggedAuthSkipThisEpisode)
+		{
+			bHasLoggedAuthSkipThisEpisode = true;
+			UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Step skipped: evaluation not authorized (RuntimeState=%d, GenomeID=%d). Awaiting GrantEvaluationAuthorization()."),
+				*GetAgentLogId(), (int32)RuntimeState, GenomeID);
+		}
+		return;
+	}
+
+	// Within authorized/evaluating state: still guard against NEAT mode without a backend.
+	// This should not normally occur (manager assigns backend before authorizing), but log clearly if it does.
+	if (GenomeID >= 0 && !HasNEATPolicyBackend())
 	{
 		if (!bHasLoggedNEATNoBackendThisEpisode)
 		{
 			bHasLoggedNEATNoBackendThisEpisode = true;
-			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT evaluation mode (GenomeID=%d) but no policy backend assigned; skipping StepOnce until backend is set."), *GetAgentLogId(), GenomeID);
+			UE_LOG(LogCarAIAgent, Error, TEXT("[%s] NEAT mode (GenomeID=%d) authorized but no policy backend found; skipping step. This indicates a manager assignment bug."),
+				*GetAgentLogId(), GenomeID);
 		}
 		return;
 	}
@@ -81,12 +127,86 @@ void URacingAgentComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 void URacingAgentComponent::Initialize()
 {
+	// Guard: Initialize() must only be called after evaluation authorization is granted.
+	if (RuntimeState != EAgentRuntimeState::EvaluationAuthorized)
+	{
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] Initialize() called but RuntimeState is not EvaluationAuthorized (state=%d, GenomeID=%d). Call GrantEvaluationAuthorization() first."),
+			*GetAgentLogId(), (int32)RuntimeState, GenomeID);
+		return;
+	}
+
+	RuntimeState = EAgentRuntimeState::Evaluating;
 	Activate();
 	SetComponentTickEnabled(true);
 	ResetEpisode();
 
-	UE_LOG(LogTemp, Log, TEXT("[%s] Agent initialized"), *GetAgentLogId());
-	UE_LOG(LogTemp, Log, TEXT("[%s] Agent activated for evaluation; StepOnce will run each tick until episode ends"), *GetAgentLogId());
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Agent initialized and evaluating. RuntimeState=Evaluating GenomeID=%d. StepOnce will run each tick until episode ends."),
+		*GetAgentLogId(), GenomeID);
+}
+
+void URacingAgentComponent::MarkRegistered()
+{
+	if (RuntimeState != EAgentRuntimeState::Idle)
+	{
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] MarkRegistered() called but RuntimeState is not Idle (state=%d). Ignoring."),
+			*GetAgentLogId(), (int32)RuntimeState);
+		return;
+	}
+	RuntimeState = EAgentRuntimeState::Registered;
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Agent registered. RuntimeState=Registered GenomeID=%d. Awaiting genome assignment and evaluation authorization."),
+		*GetAgentLogId(), GenomeID);
+}
+
+void URacingAgentComponent::GrantEvaluationAuthorization()
+{
+	if (RuntimeState != EAgentRuntimeState::Registered)
+	{
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] GrantEvaluationAuthorization() called from unexpected state (state=%d, GenomeID=%d). Expected Registered."),
+			*GetAgentLogId(), (int32)RuntimeState, GenomeID);
+		return;
+	}
+	if (GenomeID < 0)
+	{
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] GrantEvaluationAuthorization() refused: GenomeID=%d is invalid (must be >= 0). Assign a genome first."),
+			*GetAgentLogId(), GenomeID);
+		return;
+	}
+	if (!HasNEATPolicyBackend())
+	{
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] GrantEvaluationAuthorization() refused: no valid NEAT policy backend (GenomeID=%d). Assign a backend first."),
+			*GetAgentLogId(), GenomeID);
+		return;
+	}
+	bHasLoggedAuthSkipThisEpisode = false;
+	RuntimeState = EAgentRuntimeState::EvaluationAuthorized;
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Evaluation authorization GRANTED. RuntimeState=EvaluationAuthorized GenomeID=%d. Ready to Initialize() and step."),
+		*GetAgentLogId(), GenomeID);
+}
+
+void URacingAgentComponent::RevokeEvaluationAuthorization()
+{
+	if (RuntimeState == EAgentRuntimeState::Idle || RuntimeState == EAgentRuntimeState::Registered)
+	{
+		return;
+	}
+	const EAgentRuntimeState PrevState = RuntimeState;
+	RuntimeState = EAgentRuntimeState::Registered;
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Evaluation authorization REVOKED (was state=%d). RuntimeState=Registered GenomeID=%d."),
+		*GetAgentLogId(), (int32)PrevState, GenomeID);
+}
+
+void URacingAgentComponent::ResetToIdle()
+{
+	RuntimeState = EAgentRuntimeState::Idle;
+	GenomeID = -1;
+	Generation = 0;
+	SetPolicyBackend(nullptr);
+	bEpisodeDone = false;
+	bHasLoggedAuthSkipThisEpisode = false;
+	bHasLoggedNEATNoBackendThisEpisode = false;
+	Deactivate();
+	SetComponentTickEnabled(false);
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Agent reset to Idle (ResetToIdle). GenomeID cleared. Stepping disabled."), *GetAgentLogId());
 }
 
 // ============================================================================
@@ -98,7 +218,7 @@ void URacingAgentComponent::ResetEpisode()
 	APlayerStart* PlayerStart = FindPlayerStart();
 	if (!PlayerStart)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[%s] No Player Start found!"), *GetAgentLogId());
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] No Player Start found!"), *GetAgentLogId());
 		return;
 	}
 
@@ -117,7 +237,7 @@ void URacingAgentComponent::ResetEpisode()
 	AActor* Vehicle = GetVehicleActor();
 	if (!Vehicle)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[%s] No vehicle actor!"), *GetAgentLogId());
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] No vehicle actor!"), *GetAgentLogId());
 		return;
 	}
 
@@ -132,7 +252,8 @@ void URacingAgentComponent::ResetEpisode()
 	ResetEpisodeAccumulators();
 	ResetAdaptiveRays();
 
-	UE_LOG(LogTemp, Log, TEXT("[%s] Episode reset; evaluation active (stepping each tick)"), *GetAgentLogId());
+	UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Episode reset. RuntimeState=%d GenomeID=%d. Stepping begins this tick."),
+		*GetAgentLogId(), (int32)RuntimeState, GenomeID);
 }
 
 void URacingAgentComponent::ResetEpisodeAccumulators()
@@ -145,6 +266,7 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 	bHasLoggedPolicyMissingThisEpisode = false;
 	bHasLoggedNEATSchemaThisEpisode = false;
 	bHasLoggedNEATNoBackendThisEpisode = false;
+	bHasLoggedAuthSkipThisEpisode = false;
 
 	AActor* Vehicle = GetVehicleActor();
 	EpisodeStartLocation = Vehicle ? Vehicle->GetActorLocation() : FVector::ZeroVector;
@@ -202,10 +324,10 @@ void URacingAgentComponent::EnsureTrackSpline()
 			if (Spline)
 			{
 				CachedTrackSpline = Spline;
-				if (bEnableLogging)
-				{
-					UE_LOG(LogTemp, Log, TEXT("[%s] Track spline resolved for progress (length %.1fm)"), *GetAgentLogId(), Spline->GetSplineLength() / 100.f);
-				}
+			if (bEnableLogging)
+			{
+				UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Track spline resolved for progress (length %.1fm)"), *GetAgentLogId(), Spline->GetSplineLength() / 100.f);
+			}
 				return;
 			}
 		}
@@ -269,18 +391,19 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 	AActor* Vehicle = GetVehicleActor();
 	if (!Vehicle)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[%s] StepOnce: no vehicle actor; skipping step"), *GetAgentLogId());
+		UE_LOG(LogCarAIAgent, Error, TEXT("[%s] StepOnce: no vehicle actor; skipping step"), *GetAgentLogId());
 		return;
 	}
 
 	// First step this episode: log that stepping has started
 	if (EpisodeStepCount == 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[%s] Agent step executing (first step this episode, GenomeID=%d)"), *GetAgentLogId(), GenomeID);
+		UE_LOG(LogCarAIAgent, Display, TEXT("[%s] First step this episode. RuntimeState=%d GenomeID=%d Generation=%d"),
+			*GetAgentLogId(), (int32)RuntimeState, GenomeID, Generation);
 	}
 	else if (bEnableLogging && (EpisodeStepCount % 100 == 0))
 	{
-		UE_LOG(LogTemp, Log, TEXT("[%s] Agent step executing (step %d)"), *GetAgentLogId(), EpisodeStepCount);
+		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Step %d (GenomeID=%d)"), *GetAgentLogId(), EpisodeStepCount, GenomeID);
 	}
 
 	// 1. Build Observation
@@ -306,8 +429,8 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		if (!bHasLoggedPolicyMissingThisEpisode)
 		{
 			bHasLoggedPolicyMissingThisEpisode = true;
-			UE_LOG(LogTemp, Error, TEXT("[%s] Observation size mismatch: vector has %d elements, policy expects %d. NEAT path requires exactly %d inputs (no LIDAR)."),
-				*GetAgentLogId(), Obs.Vector.Num(), ExpectedInputs, FRacingObservation::NEAT_OBSERVATION_SIZE);
+			UE_LOG(LogCarAIAgent, Error, TEXT("[%s] Observation size mismatch: vector has %d elements, policy expects %d. NEAT path requires exactly %d inputs (no LIDAR). GenomeID=%d"),
+				*GetAgentLogId(), Obs.Vector.Num(), ExpectedInputs, FRacingObservation::NEAT_OBSERVATION_SIZE, GenomeID);
 		}
 	}
 	else if (PolicyBackend && PolicyBackend->IsValid())
@@ -317,7 +440,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 			if (!bHasLoggedNEATSchemaThisEpisode)
 			{
 				bHasLoggedNEATSchemaThisEpisode = true;
-				UE_LOG(LogTemp, Log, TEXT("[%s] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
+				UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
 					*GetAgentLogId(), FRacingObservation::NEAT_OBSERVATION_SIZE);
 			}
 			// NEAT evaluation: use only PolicyBackend; no fallback to PolicyNetwork.
@@ -325,7 +448,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 			if (!bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
 			{
 				bHasLoggedPolicyMissingThisEpisode = true;
-				UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
+				UE_LOG(LogCarAIAgent, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). GenomeID=%d Check evaluator logs."), *GetAgentLogId(), GenomeID);
 			}
 		}
 		else
@@ -369,7 +492,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 			if (!bHasLoggedPolicyMissingThisEpisode)
 			{
 				bHasLoggedPolicyMissingThisEpisode = true;
-				UE_LOG(LogTemp, Warning, TEXT("[%s] No policy backend or network set. Using fallback forward drive (non-NEAT gameplay only)."), *GetAgentLogId());
+				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] No policy backend or network set. Using fallback forward drive (non-NEAT gameplay only). GenomeID=%d"), *GetAgentLogId(), GenomeID);
 			}
 			Action.Steer = 0.f;
 			Action.Throttle = 0.5f;
@@ -411,10 +534,10 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 
 		OnEpisodeDone.Broadcast(EpisodeStats);
 
-		UE_LOG(LogTemp, Log, TEXT("[%s] Episode completed: %s (Fitness: %.2f, Steps: %d, Progress: %.1fm)"),
+		UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Episode completed: %s | Fitness=%.2f Steps=%d Progress=%.1fm GenomeID=%d"),
 			*GetAgentLogId(), *TermReason, EpisodeStats.NEATFitness, EpisodeStats.StepCount,
-			EpisodeStats.DistanceTraveledCm / 100.f);
-		UE_LOG(LogTemp, Log, TEXT("[%s] Reward breakdown: Distance=%.3f Survival=%.3f Speed=%.3f Smoothness=%.3f Collision=%.3f Gap=%.3f Total=%.3f"),
+			EpisodeStats.DistanceTraveledCm / 100.f, GenomeID);
+		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Reward breakdown: Distance=%.3f Survival=%.3f Speed=%.3f Smoothness=%.3f Collision=%.3f Gap=%.3f Total=%.3f"),
 			*GetAgentLogId(), Reward.Distance, Reward.Survival, Reward.Speed, Reward.Smoothness, Reward.Collision, Reward.GapPenalty, Reward.Total);
 
 		return;
@@ -861,7 +984,7 @@ void URacingAgentComponent::FinalizeEpisodeStats(const FString& TerminationReaso
 			SpeedBonusEstimate = ProgressKmh * 0.1f;
 		}
 		const float ScaleFactor = (EpisodeStats.DurationSeconds < 2.0f) ? 0.5f : 1.0f;
-		UE_LOG(LogTemp, Log, TEXT("[%s] Fitness breakdown: NEATFitness=%.2f progress_m=%.1f speed_bonus_est=%.2f scale=%.1f duration=%.1fs termination=%s"),
+		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Fitness breakdown: NEATFitness=%.2f progress_m=%.1f speed_bonus_est=%.2f scale=%.1f duration=%.1fs termination=%s"),
 			*GetAgentLogId(), EpisodeStats.NEATFitness, ProgressM, SpeedBonusEstimate * ScaleFactor,
 			ScaleFactor, EpisodeStats.DurationSeconds, *EpisodeStats.TerminationReason);
 	}
@@ -945,7 +1068,12 @@ void URacingAgentComponent::ForceEpisodeDone()
 {
 	bEpisodeDone = true;
 	PolicyBackend = nullptr;
-	UE_LOG(LogTemp, Log, TEXT("[%s] Agent deactivated for batch isolation (GenomeID=%d)"), *GetAgentLogId(), GenomeID);
+	// Revoke authorization so this agent cannot start a new episode until re-authorized.
+	if (RuntimeState == EAgentRuntimeState::EvaluationAuthorized || RuntimeState == EAgentRuntimeState::Evaluating)
+	{
+		RuntimeState = EAgentRuntimeState::Registered;
+	}
+	UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Agent deactivated for batch isolation (GenomeID=%d). RuntimeState=Registered. Authorization revoked."), *GetAgentLogId(), GenomeID);
 }
 
 // ============================================================================
