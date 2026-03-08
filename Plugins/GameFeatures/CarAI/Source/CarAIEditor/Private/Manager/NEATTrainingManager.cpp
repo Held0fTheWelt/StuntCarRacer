@@ -329,6 +329,8 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated, count matches PopulationSize); ready for batch evaluation"),
 		LoadedCount, CurrentGeneration);
 
+	LogNEATStatusSummary(TEXT("LoadGenomes"));
+
 	return true;
 }
 
@@ -727,6 +729,8 @@ void UNEATTrainingManager::ExportFitnessValues()
 		return;
 	}
 
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] HARD GATE: fitness export verified at %s (%d genomes)"), *OutputPath, GenomeFitnessMap.Num());
+
 	LastExportedFitnessFilePath = OutputPath;
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Exported fitness for generation %d (%d genomes, Avg=%.2f) -> %s"),
 		CurrentGeneration, GenomeFitnessMap.Num(), TrainingStats.AvgFitness, *OutputPath);
@@ -787,6 +791,9 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 	}
 
 	LogNEATStatusSummary(TEXT("AfterPythonLoad"));
+
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python evolution complete: generation=%d, %d genomes loaded, %d agents registered"),
+		CurrentGeneration, CurrentGenomes.Num(), Agents.Num());
 
 	CurrentBatchStartIndex = 0;
 	if (CurrentGenomes.Num() > Agents.Num())
