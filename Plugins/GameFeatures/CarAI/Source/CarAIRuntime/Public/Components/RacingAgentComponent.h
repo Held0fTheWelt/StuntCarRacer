@@ -80,7 +80,7 @@ public:
 
 	/** True if a NEAT policy backend is set and valid (executable). */
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
-	bool HasNEATPolicyBackend() const { return PolicyBackend && PolicyBackend->IsValid(); }
+	bool HasNEATPolicyBackend() const;
 
 	/** True if a fixed network (SimpleNeuralNetwork) is set. */
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")

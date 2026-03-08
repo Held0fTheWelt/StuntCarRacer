@@ -224,7 +224,7 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 {
 	const FNEATTrainingContract Contract = GetResolvedContract();
 	const FString GenomeListPath = FPaths::Combine(Contract.GenomeDir,
-		FString::Printf(FNEATTrainingContract::GenomesListFileNameFormat, CurrentGeneration));
+		FString::Printf(TEXT("generation_%d_genomes.json"), CurrentGeneration));
 
 	if (!FPaths::FileExists(GenomeListPath))
 	{
@@ -267,7 +267,7 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 		int32 GenomeID = (*GenomeObj)->GetIntegerField(TEXT("genome_id"));
 		GenomeIds.Add(GenomeID);
 		const FString GenomePath = FPaths::Combine(Contract.GenomeDir,
-			FString::Printf(FNEATTrainingContract::GenomeFileNameFormat, GenomeID));
+			FString::Printf(TEXT("genome_%d.json"), GenomeID));
 		if (!FPaths::FileExists(GenomePath))
 		{
 			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Missing genome file: %s (genome_id=%d)"), *GenomePath, GenomeID);
@@ -280,7 +280,7 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 	for (int32 GenomeID : GenomeIds)
 	{
 		const FString GenomePath = FPaths::Combine(Contract.GenomeDir,
-			FString::Printf(FNEATTrainingContract::GenomeFileNameFormat, GenomeID));
+			FString::Printf(TEXT("genome_%d.json"), GenomeID));
 
 		FNEATGenome LoadedGenome;
 		if (!UNEATGenomeImporter::LoadFromFile(GenomePath, LoadedGenome))
@@ -641,7 +641,7 @@ void UNEATTrainingManager::ExportFitnessValues()
 
 	// Write JSON
 	const FString OutputPath = FPaths::Combine(Contract.FitnessDir,
-		FString::Printf(FNEATTrainingContract::FitnessFileNameFormat, CurrentGeneration));
+		FString::Printf(TEXT("generation_%d.json"), CurrentGeneration));
 
 	FString JsonString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);

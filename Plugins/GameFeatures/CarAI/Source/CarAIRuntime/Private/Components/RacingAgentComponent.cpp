@@ -860,6 +860,11 @@ void URacingAgentComponent::SetPolicyBackend(UPolicyBackend* Backend)
 	PolicyBackend = Backend;
 }
 
+bool URacingAgentComponent::HasNEATPolicyBackend() const
+{
+	return PolicyBackend && PolicyBackend->IsValid();
+}
+
 // ============================================================================
 // Debug Visualization
 // ============================================================================
