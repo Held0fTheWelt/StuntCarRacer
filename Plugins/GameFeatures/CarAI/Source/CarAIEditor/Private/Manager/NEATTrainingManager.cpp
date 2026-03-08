@@ -54,6 +54,8 @@ void UNEATTrainingManager::StartTraining()
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   checkpoint_dir=%s"), *Contract.CheckpointDir);
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   best_genome_path=%s"), *Contract.BestGenomePath);
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   observation_size=%d action_size=%d"), Contract.ObservationSize, Contract.ActionSize);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
+		FRacingObservation::NEAT_OBSERVATION_SIZE);
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] --- end contract ---"));
 
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting NEAT training"));
@@ -174,7 +176,12 @@ FNEATTrainingContract UNEATTrainingManager::GetResolvedContract() const
 	C.GenomeDir = FPaths::Combine(SavedDir, GenomeInputDir);
 	C.CheckpointDir = C.GenomeDir;
 	C.BestGenomePath = FPaths::Combine(C.GenomeDir, FNEATTrainingContract::BestGenomeFileName);
-	C.ObservationSize = ObservationSize;
+	C.ObservationSize = FRacingObservation::NEAT_OBSERVATION_SIZE;
+	if (ObservationSize != FRacingObservation::NEAT_OBSERVATION_SIZE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] ObservationSize %d ignored; NEAT contract uses canonical size %d (FRacingObservation::NEAT_OBSERVATION_SIZE)."),
+			ObservationSize, FRacingObservation::NEAT_OBSERVATION_SIZE);
+	}
 	C.ActionSize = ActionSize;
 	return C;
 }
@@ -460,8 +467,12 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
+				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); loading best genome for inference"), NumGenerations);
+				if (!LoadBestGenome())
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Best genome could not be loaded after training (path=%s); agents retain last batch genome"), *GetResolvedContract().BestGenomePath);
+				}
 				OnTrainingComplete.Broadcast();
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed! (%d generations)"), NumGenerations);
 			}
 			else
 			{
@@ -515,8 +526,12 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
+				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); loading best genome for inference"), NumGenerations);
+				if (!LoadBestGenome())
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Best genome could not be loaded after training (path=%s); agents retain last batch genome"), *GetResolvedContract().BestGenomePath);
+				}
 				OnTrainingComplete.Broadcast();
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed! (%d generations)"), NumGenerations);
 			}
 			else
 			{
