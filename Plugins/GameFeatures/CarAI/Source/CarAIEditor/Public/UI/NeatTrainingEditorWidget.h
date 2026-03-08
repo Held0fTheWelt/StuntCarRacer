@@ -8,6 +8,27 @@ class UNEATTrainingManager;
 class URacingAgentComponent;
 
 /**
+ * Editor-side workflow state for deferred NEAT training.
+ * Separates "user requested training" (armed) from "runtime conditions ready to start now".
+ * PIE lifecycle and auto-register/auto-start are driven by these states in later MVPs.
+ */
+UENUM(BlueprintType)
+enum class ENeatTrainingWorkflowState : uint8
+{
+	Idle,
+	ManagerInitialized,
+	ArmedForPIE,
+	WaitingForPIEWorld,
+	WaitingForRuntimeAgents,
+	AgentsRegistered,
+	TrainingStarting,
+	TrainingRunning,
+	TrainingFailed,
+	TrainingCompleted,
+	PIEEnded
+};
+
+/**
  * Editor Utility Widget C++ base for the NEAT training control surface.
  *
  * This class is the editor-facing control panel only. All training logic lives in
@@ -17,15 +38,15 @@ class URacingAgentComponent;
  * Blueprint asset: Content/Editor/EUW_NeatTraining.uasset
  * The Blueprint must be reparented to this class in the Unreal Editor.
  *
- * Typical workflow:
+ * Primary workflow (pre-PIE armed):
  *   1. Open EUW_NeatTraining via Window > Car AI > NEAT Training.
  *   2. Set config (FreshStart, PopulationSize, NumGenerations, etc.).
  *   3. Click Initialize Manager.
- *   4. Enter PIE (or load the training level).
- *   5. Click Register Agents.
- *   6. Click Start Training.
- *   7. Monitor status via Refresh Status or watch the Output Log.
- *   8. Click Stop Training to end early.
+ *   4. Click Arm Training (or Start When Ready).
+ *   5. Start PIE — the system will wait for PIE world and GameFeature-added agents, then auto-register and auto-start training.
+ *
+ * Secondary workflow (PIE already running):
+ *   Initialize Manager, then Register Agents, then Start Training (manual).
  */
 UCLASS()
 class CARAIEDITOR_API UNeatTrainingEditorWidget : public UEditorUtilityWidget
@@ -57,6 +78,14 @@ public:
 
 	// ===== Status (Blueprint-readable for UI display) =====
 
+	/** Current editor workflow state (armed, waiting for PIE, training running, etc.). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
+	ENeatTrainingWorkflowState WorkflowState = ENeatTrainingWorkflowState::Idle;
+
+	/** True when the user has requested training to start automatically once PIE and agents are ready (pre-PIE "Arm Training" action). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
+	bool bArmedForPIE = false;
+
 	/** True when the manager has been created and is ready. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
 	bool bManagerReady = false;
@@ -73,7 +102,7 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
 	bool bTrainingInProgress = false;
 
-	/** Last status message for display in the widget UI. */
+	/** Last status message for display in the widget UI. Reflects current workflow state and what the tool is waiting for. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
 	FString LastStatusMessage = TEXT("Not initialized");
 
@@ -82,10 +111,19 @@ public:
 	/**
 	 * Create or reuse the NEAT training manager for this editor session.
 	 * Safe to call multiple times — reuses the existing instance if valid.
-	 * Must be called before RegisterAgents or StartTraining.
+	 * Must be called before ArmTraining, RegisterAgents, or StartTraining.
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void InitializeManager();
+
+	/**
+	 * Arm training for automatic start when PIE and runtime agents are ready.
+	 * Call this before starting PIE; the tool will then wait for PIE world and
+	 * GameFeature-added agents, then auto-register and auto-start training.
+	 * Label in UI can be "Arm Training", "Start When Ready", or "Queue Training For PIE".
+	 */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
+	void ArmTraining();
 
 	/**
 	 * Find and register all URacingAgentComponent instances in the current
@@ -98,6 +136,7 @@ public:
 	/**
 	 * Apply current config and start NEAT training.
 	 * Fails loudly if: no manager, no agents, empty Python executable.
+	 * Can be called manually (secondary workflow) or by the armed auto-start path.
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void StartTraining();
@@ -119,10 +158,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
 	UNEATTrainingManager* GetManager() const { return TrainingManager; }
 
+	/** Returns a short user-facing description of the current workflow state (for status text and logs). */
+	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
+	FString GetWorkflowStateDescription() const;
+
 private:
 	/** The NEAT training manager owned by this widget for the duration of the editor session. */
 	UPROPERTY()
 	TObjectPtr<UNEATTrainingManager> TrainingManager;
+
+	/** Set workflow state, log the transition, and update LastStatusMessage. */
+	void SetWorkflowState(ENeatTrainingWorkflowState NewState);
 
 	/** Apply current widget config properties to the manager before training starts. */
 	void ApplyConfigToManager();

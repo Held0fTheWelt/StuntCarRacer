@@ -9,6 +9,73 @@
 #include "GameFramework/Actor.h"
 
 // ============================================================================
+// Workflow State
+// ============================================================================
+
+static const TCHAR* WorkflowStateToShortString(ENeatTrainingWorkflowState S)
+{
+	switch (S)
+	{
+		case ENeatTrainingWorkflowState::Idle:                    return TEXT("Idle");
+		case ENeatTrainingWorkflowState::ManagerInitialized:     return TEXT("ManagerInitialized");
+		case ENeatTrainingWorkflowState::ArmedForPIE:            return TEXT("ArmedForPIE");
+		case ENeatTrainingWorkflowState::WaitingForPIEWorld:     return TEXT("WaitingForPIEWorld");
+		case ENeatTrainingWorkflowState::WaitingForRuntimeAgents: return TEXT("WaitingForRuntimeAgents");
+		case ENeatTrainingWorkflowState::AgentsRegistered:      return TEXT("AgentsRegistered");
+		case ENeatTrainingWorkflowState::TrainingStarting:       return TEXT("TrainingStarting");
+		case ENeatTrainingWorkflowState::TrainingRunning:        return TEXT("TrainingRunning");
+		case ENeatTrainingWorkflowState::TrainingFailed:         return TEXT("TrainingFailed");
+		case ENeatTrainingWorkflowState::TrainingCompleted:     return TEXT("TrainingCompleted");
+		case ENeatTrainingWorkflowState::PIEEnded:               return TEXT("PIEEnded");
+		default:                                                return TEXT("Unknown");
+	}
+}
+
+void UNeatTrainingEditorWidget::SetWorkflowState(ENeatTrainingWorkflowState NewState)
+{
+	const ENeatTrainingWorkflowState OldState = WorkflowState;
+	if (OldState == NewState)
+	{
+		return;
+	}
+	WorkflowState = NewState;
+	LastStatusMessage = GetWorkflowStateDescription();
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Workflow state: %s -> %s | %s"),
+		WorkflowStateToShortString(OldState), WorkflowStateToShortString(NewState), *LastStatusMessage);
+}
+
+FString UNeatTrainingEditorWidget::GetWorkflowStateDescription() const
+{
+	switch (WorkflowState)
+	{
+		case ENeatTrainingWorkflowState::Idle:
+			return TEXT("Idle. Initialize Manager to begin.");
+		case ENeatTrainingWorkflowState::ManagerInitialized:
+			return TEXT("Manager ready. Arm training (then start PIE) or register agents and start manually.");
+		case ENeatTrainingWorkflowState::ArmedForPIE:
+			return TEXT("Armed for training. Start PIE to continue automatically.");
+		case ENeatTrainingWorkflowState::WaitingForPIEWorld:
+			return TEXT("Waiting for PIE world...");
+		case ENeatTrainingWorkflowState::WaitingForRuntimeAgents:
+			return TEXT("Waiting for runtime agents (GameFeature)...");
+		case ENeatTrainingWorkflowState::AgentsRegistered:
+			return FString::Printf(TEXT("Agents registered (%d). Starting training..."), RegisteredAgentCount);
+		case ENeatTrainingWorkflowState::TrainingStarting:
+			return TEXT("Starting training...");
+		case ENeatTrainingWorkflowState::TrainingRunning:
+			return FString::Printf(TEXT("Training running (generation %d)."), CurrentGeneration);
+		case ENeatTrainingWorkflowState::TrainingFailed:
+			return TEXT("Training failed. Check Output Log.");
+		case ENeatTrainingWorkflowState::TrainingCompleted:
+			return TEXT("Training completed.");
+		case ENeatTrainingWorkflowState::PIEEnded:
+			return TEXT("PIE ended. Re-arm or re-register to run again.");
+		default:
+			return TEXT("Unknown state");
+	}
+}
+
+// ============================================================================
 // Manager Lifetime
 // ============================================================================
 
@@ -17,8 +84,8 @@ void UNeatTrainingEditorWidget::InitializeManager()
 	if (TrainingManager && IsValid(TrainingManager))
 	{
 		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Manager already initialized; reusing existing instance"));
-		LastStatusMessage = TEXT("Manager ready (reused)");
 		bManagerReady = true;
+		SetWorkflowState(ENeatTrainingWorkflowState::ManagerInitialized);
 		RefreshStatus();
 		return;
 	}
@@ -33,9 +100,22 @@ void UNeatTrainingEditorWidget::InitializeManager()
 	}
 
 	bManagerReady = true;
-	LastStatusMessage = TEXT("Manager initialized");
 	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] UNEATTrainingManager created successfully"));
+	SetWorkflowState(ENeatTrainingWorkflowState::ManagerInitialized);
 	RefreshStatus();
+}
+
+void UNeatTrainingEditorWidget::ArmTraining()
+{
+	if (!TrainingManager || !IsValid(TrainingManager))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NeatTrainingEditorWidget] ArmTraining: manager not initialized; call Initialize Manager first"));
+		LastStatusMessage = TEXT("Initialize manager first, then Arm Training");
+		return;
+	}
+	bArmedForPIE = true;
+	SetWorkflowState(ENeatTrainingWorkflowState::ArmedForPIE);
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Training armed for PIE. Start PIE to continue automatically."));
 }
 
 // ============================================================================
@@ -86,9 +166,9 @@ void UNeatTrainingEditorWidget::RegisterAgents()
 	}
 	else
 	{
+		SetWorkflowState(ENeatTrainingWorkflowState::AgentsRegistered);
 		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Agent registration: found and registered %d agent(s) in world '%s'"),
 			Count, *World->GetName());
-		LastStatusMessage = FString::Printf(TEXT("Registered %d agent(s)"), Count);
 	}
 }
 
@@ -121,6 +201,7 @@ void UNeatTrainingEditorWidget::StartTraining()
 
 	ApplyConfigToManager();
 
+	SetWorkflowState(ENeatTrainingWorkflowState::TrainingStarting);
 	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Training start requested: FreshStart=%s, Agents=%d, Generations=%d, PopulationSize=%d, MaxEpisodeDuration=%.1fs, Python='%s'"),
 		bFreshStart ? TEXT("true") : TEXT("false"),
 		RegisteredAgentCount, NumGenerations, PopulationSize, MaxEpisodeDuration, *PythonExecutable);
@@ -128,7 +209,7 @@ void UNeatTrainingEditorWidget::StartTraining()
 	TrainingManager->StartTraining();
 
 	bTrainingInProgress = true;
-	LastStatusMessage = FString::Printf(TEXT("Training started (%d agents, %d generations)"), RegisteredAgentCount, NumGenerations);
+	SetWorkflowState(ENeatTrainingWorkflowState::TrainingRunning);
 }
 
 void UNeatTrainingEditorWidget::StopTraining()
@@ -144,7 +225,7 @@ void UNeatTrainingEditorWidget::StopTraining()
 	TrainingManager->StopTraining();
 
 	bTrainingInProgress = false;
-	LastStatusMessage = TEXT("Training stopped");
+	SetWorkflowState(ENeatTrainingWorkflowState::ManagerInitialized);
 	RefreshStatus();
 }
 
@@ -161,7 +242,11 @@ void UNeatTrainingEditorWidget::RefreshStatus()
 		bTrainingInProgress = false;
 		RegisteredAgentCount = 0;
 		CurrentGeneration = 0;
-		if (LastStatusMessage.IsEmpty())
+		if (WorkflowState != ENeatTrainingWorkflowState::Idle)
+		{
+			SetWorkflowState(ENeatTrainingWorkflowState::Idle);
+		}
+		else if (LastStatusMessage.IsEmpty())
 		{
 			LastStatusMessage = TEXT("Not initialized");
 		}
@@ -171,6 +256,12 @@ void UNeatTrainingEditorWidget::RefreshStatus()
 	bTrainingInProgress = TrainingManager->IsTraining();
 	CurrentGeneration = TrainingManager->GetCurrentGeneration();
 	// RegisteredAgentCount is authoritative from RegisterAgents(); do not reset here.
+
+	// Keep status text in sync with workflow state (e.g. TrainingRunning shows current generation)
+	if (WorkflowState == ENeatTrainingWorkflowState::TrainingRunning)
+	{
+		LastStatusMessage = GetWorkflowStateDescription();
+	}
 }
 
 // ============================================================================
