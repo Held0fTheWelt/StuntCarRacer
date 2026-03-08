@@ -491,6 +491,12 @@ void UNeatTrainingEditorWidget::RefreshStatus()
 	bTrainingInProgress = TrainingManager->IsTraining();
 	CurrentGeneration = TrainingManager->GetCurrentGeneration();
 
+	// If manager finished or stopped, align workflow state so status text is correct.
+	if (WorkflowState == ENeatTrainingWorkflowState::TrainingRunning && !bTrainingInProgress)
+	{
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingCompleted);
+	}
+
 	bArmTrainingEnabled = !bTrainingInProgress;
 	bRegisterAgentsEnabled = (GetEditorOrPIEWorld() != nullptr);
 	bStartTrainingEnabled = (RegisteredAgentCount > 0 && !PythonExecutable.IsEmpty());
