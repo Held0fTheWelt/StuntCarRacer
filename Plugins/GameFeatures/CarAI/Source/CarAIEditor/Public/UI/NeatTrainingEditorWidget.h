@@ -188,6 +188,9 @@ private:
 	/** Poll for URacingAgentComponent in CachedPIEWorld; register when found or fail after max duration. Called by discovery timer. */
 	void PollForRuntimeAgents();
 
+	/** Run readiness gate (manager, agents, Python). If pass, start training automatically. Returns true if training was started. */
+	bool TryAutoStartTraining();
+
 private:
 	/** Cached PIE world when armed flow is waiting for agents. Cleared on PIE end. */
 	TWeakObjectPtr<UWorld> CachedPIEWorld;

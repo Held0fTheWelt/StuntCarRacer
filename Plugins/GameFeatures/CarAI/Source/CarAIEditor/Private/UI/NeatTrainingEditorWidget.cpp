@@ -119,6 +119,25 @@ void UNeatTrainingEditorWidget::ArmTraining()
 	bArmedForPIE = true;
 	SetWorkflowState(ENeatTrainingWorkflowState::ArmedForPIE);
 	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Training armed for PIE. Start PIE to continue automatically."));
+
+	// Secondary path: PIE already running — start discovery immediately.
+	UWorld* ExistingPIEWorld = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::PIE && Context.World())
+			{
+				ExistingPIEWorld = Context.World();
+				break;
+			}
+		}
+	}
+	if (ExistingPIEWorld)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] PIE already active; starting agent discovery now."));
+		OnPIEWorldStarted(ExistingPIEWorld);
+	}
 }
 
 void UNeatTrainingEditorWidget::NativeConstruct()
@@ -241,8 +260,47 @@ void UNeatTrainingEditorWidget::PollForRuntimeAgents()
 	}
 	RegisteredAgentCount = Found.Num();
 	SetWorkflowState(ENeatTrainingWorkflowState::AgentsRegistered);
-	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery: found and registered %d agent(s) in PIE world '%s'."),
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery: found and registered %d agent(s) in PIE world '%s'. Registration complete."),
 		RegisteredAgentCount, *World->GetName());
+
+	// Auto-start training when ready (no post-PIE click required).
+	if (TryAutoStartTraining())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Training auto-start triggered after agent registration."));
+	}
+}
+
+bool UNeatTrainingEditorWidget::TryAutoStartTraining()
+{
+	if (!TrainingManager || !IsValid(TrainingManager))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NeatTrainingEditorWidget] Readiness check FAILED: manager not initialized."));
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
+		LastStatusMessage = TEXT("Readiness failed: manager not initialized.");
+		return false;
+	}
+	if (RegisteredAgentCount <= 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NeatTrainingEditorWidget] Readiness check FAILED: no agents registered."));
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
+		LastStatusMessage = TEXT("Readiness failed: no agents registered.");
+		return false;
+	}
+	if (PythonExecutable.IsEmpty())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NeatTrainingEditorWidget] Readiness check FAILED: Python executable not set."));
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
+		LastStatusMessage = TEXT("Readiness failed: set Python executable in config.");
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Readiness check passed (manager, %d agents, Python). Auto-starting training."), RegisteredAgentCount);
+	SetWorkflowState(ENeatTrainingWorkflowState::TrainingStarting);
+	ApplyConfigToManager();
+	TrainingManager->StartTraining();
+	bTrainingInProgress = true;
+	SetWorkflowState(ENeatTrainingWorkflowState::TrainingRunning);
+	return true;
 }
 
 void UNeatTrainingEditorWidget::OnPIEEnded()
