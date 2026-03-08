@@ -8,7 +8,6 @@
 
 class URacingAgentComponent;
 class UPythonTrainingExecutor;
-class USimpleNeuralNetwork;
 
 // ============================================================================
 // NEAT Training Contract (Unreal = single source of truth; passed to Python via manifest)

@@ -4,6 +4,16 @@
 #include "NEATGenomeTypes.generated.h"
 
 /**
+ * Canonical Unreal runtime data model for NEAT genomes.
+ * These types represent the full topology exported by the Python NEAT workflow (train_neat.py).
+ * Use FNEATGenome + UNEATGraphEvaluator for loading and evaluation; do not use SimpleNeuralNetwork
+ * for NEAT genome structure (arbitrary topology is not equivalent to a fixed MLP).
+ *
+ * Pipeline: genome_*.json -> UNEATGenomeImporter::LoadFromFile -> FNEATGenome -> ValidateGenome
+ *           -> UNEATGraphEvaluator::BuildFromGenome -> Evaluate(observation) -> actions.
+ */
+
+/**
  * NEAT node activation function.
  * Must match train_neat.py activation_options: sigmoid, tanh, relu.
  */

@@ -7,8 +7,10 @@
 
 /**
  * Loads and validates NEAT genome JSON files (genome_*.json, best_genome.json)
- * produced by train_neat.py. Fail-fast on invalid structure or unsupported activation.
- * No execution; loading and validation only.
+ * produced by train_neat.py. Runtime module (CarAIRuntime); not editor-only.
+ * Fail-fast: on any invalid structure, unsupported activation, duplicate node ID,
+ * or invalid connection reference, returns false and logs a clear FAIL/VALIDATION FAIL message.
+ * No execution; loading and validation only. Use UNEATGraphEvaluator to evaluate a validated genome.
  */
 UCLASS()
 class CARAIRUNTIME_API UNEATGenomeImporter : public UObject

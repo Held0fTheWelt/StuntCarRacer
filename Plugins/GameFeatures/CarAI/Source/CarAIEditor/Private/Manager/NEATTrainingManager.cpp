@@ -1,7 +1,6 @@
 #include "Manager/NEATTrainingManager.h"
 #include "Components/RacingAgentComponent.h"
 #include "Manager/PythonTrainingExecutor.h"
-#include "NN/SimpleNeuralNetwork.h"
 #include "NN/NEATGraphEvaluator.h"
 #include "Import/NEATGenomeImporter.h"
 #include "NN/NEATGenomeTypes.h"

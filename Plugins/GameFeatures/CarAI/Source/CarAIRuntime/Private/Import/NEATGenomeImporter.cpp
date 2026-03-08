@@ -21,14 +21,14 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 	FString AbsolutePath = FPaths::ConvertRelativePathToFull(FilePath);
 	if (!FPaths::FileExists(AbsolutePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] File not found: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: File not found: %s"), *AbsolutePath);
 		return false;
 	}
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *AbsolutePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Failed to read file: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Could not read file: %s"), *AbsolutePath);
 		return false;
 	}
 
@@ -36,14 +36,16 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Invalid JSON in: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Invalid JSON in: %s"), *AbsolutePath);
 		return false;
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("[NEATGenomeImporter] Parsing genome from: %s"), *AbsolutePath);
 
 	// Required scalar fields
 	if (!Root->HasField(TEXT("genome_id")) || !Root->HasField(TEXT("generation")) || !Root->HasField(TEXT("num_inputs")) || !Root->HasField(TEXT("num_outputs")))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Missing required field (genome_id, generation, num_inputs, num_outputs) in: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Missing required field (genome_id, generation, num_inputs, num_outputs) in: %s"), *AbsolutePath);
 		return false;
 	}
 
@@ -55,16 +57,16 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 
 	if (OutGenome.NumInputs < 0 || OutGenome.NumOutputs < 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] num_inputs (%d) or num_outputs (%d) negative in: %s"),
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: num_inputs (%d) or num_outputs (%d) negative in: %s"),
 			OutGenome.NumInputs, OutGenome.NumOutputs, *AbsolutePath);
 		return false;
 	}
 
-	// Nodes
+	// Nodes array
 	const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
 	if (!Root->TryGetArrayField(TEXT("nodes"), NodesArray))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Missing 'nodes' array in: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Missing 'nodes' array in: %s"), *AbsolutePath);
 		return false;
 	}
 
@@ -74,7 +76,7 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 		const TSharedPtr<FJsonObject>* NodeObj = nullptr;
 		if (!NodeVal->TryGetObject(NodeObj) || !NodeObj->IsValid())
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Invalid node entry in 'nodes' array in: %s"), *AbsolutePath);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Invalid node entry in 'nodes' array in: %s"), *AbsolutePath);
 			return false;
 		}
 
@@ -84,7 +86,7 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 		Node.Activation = NEATActivationFromString(ActivationStr);
 		if (Node.Activation == ENEATActivation::Invalid)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Unsupported activation '%s' for node %d in: %s. Supported: sigmoid, tanh, relu."),
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Unsupported activation '%s' for node %d in: %s. Supported: sigmoid, tanh, relu."),
 				*ActivationStr, Node.NodeId, *AbsolutePath);
 			return false;
 		}
@@ -93,18 +95,18 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 
 		if (SeenNodeIds.Contains(Node.NodeId))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Duplicate node ID %d in: %s"), Node.NodeId, *AbsolutePath);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Duplicate node ID %d in: %s"), Node.NodeId, *AbsolutePath);
 			return false;
 		}
 		SeenNodeIds.Add(Node.NodeId);
 		OutGenome.Nodes.Add(Node);
 	}
 
-	// Connections
+	// Connections array
 	const TArray<TSharedPtr<FJsonValue>>* ConnArray = nullptr;
 	if (!Root->TryGetArrayField(TEXT("connections"), ConnArray))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Missing 'connections' array in: %s"), *AbsolutePath);
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Missing 'connections' array in: %s"), *AbsolutePath);
 		return false;
 	}
 
@@ -113,7 +115,7 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 		const TSharedPtr<FJsonObject>* ConnObj = nullptr;
 		if (!ConnVal->TryGetObject(ConnObj) || !ConnObj->IsValid())
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Invalid connection entry in: %s"), *AbsolutePath);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Invalid connection entry in: %s"), *AbsolutePath);
 			return false;
 		}
 
@@ -125,19 +127,20 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 
 		if (!SeenNodeIds.Contains(Conn.InNode))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Connection references missing in_node %d in: %s"), Conn.InNode, *AbsolutePath);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Connection references missing in_node %d in: %s"), Conn.InNode, *AbsolutePath);
 			return false;
 		}
 		if (!SeenNodeIds.Contains(Conn.OutNode))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Connection references missing out_node %d in: %s"), Conn.OutNode, *AbsolutePath);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] FAIL: Connection references missing out_node %d in: %s"), Conn.OutNode, *AbsolutePath);
 			return false;
 		}
 
 		OutGenome.Connections.Add(Conn);
 	}
 
-	// Validation (input/output count consistency, etc.)
+	UE_LOG(LogTemp, Log, TEXT("[NEATGenomeImporter] Parsed genome_id=%d nodes=%d connections=%d; validating structure."),
+		OutGenome.GenomeID, OutGenome.Nodes.Num(), OutGenome.Connections.Num());
 	return ValidateGenome(OutGenome);
 }
 
@@ -151,51 +154,54 @@ bool UNEATGenomeImporter::ValidateGenome(FNEATGenome& InOutGenome)
 
 	const int32 ExpectedInputs = InOutGenome.NumInputs;
 	const int32 ExpectedOutputs = InOutGenome.NumOutputs;
+
 	if (ExpectedInputs <= 0 || ExpectedOutputs <= 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Genome %d: num_inputs=%d num_outputs=%d (must be positive)"),
+		UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: num_inputs=%d num_outputs=%d (must be positive)"),
 			InOutGenome.GenomeID, ExpectedInputs, ExpectedOutputs);
 		return false;
 	}
 
-	// NEAT convention: input nodes 0..NumInputs-1, output nodes NumInputs..NumInputs+NumOutputs-1
 	TSet<int32> NodeIds;
 	for (const FNEATNode& N : InOutGenome.Nodes)
 	{
 		NodeIds.Add(N.NodeId);
 	}
 
+	// Input node count and IDs 0..NumInputs-1
 	for (int32 i = 0; i < ExpectedInputs; ++i)
 	{
 		if (!NodeIds.Contains(i))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Genome %d: missing input node %d (expected 0..%d)"),
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing input node %d (expected 0..%d)"),
 				InOutGenome.GenomeID, i, ExpectedInputs - 1);
 			return false;
 		}
 	}
+
+	// Output node count and IDs NumInputs..NumInputs+NumOutputs-1
 	for (int32 i = 0; i < ExpectedOutputs; ++i)
 	{
 		const int32 OutId = ExpectedInputs + i;
 		if (!NodeIds.Contains(OutId))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Genome %d: missing output node %d (expected %d..%d)"),
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing output node %d (expected %d..%d)"),
 				InOutGenome.GenomeID, OutId, ExpectedInputs, ExpectedInputs + ExpectedOutputs - 1);
 			return false;
 		}
 	}
 
-	// Connections: in_node and out_node must exist (already checked in LoadFromFile)
+	// All connection endpoints must reference existing nodes
 	for (const FNEATConnection& C : InOutGenome.Connections)
 	{
 		if (!NodeIds.Contains(C.InNode))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Genome %d: connection in_node %d not in nodes"), InOutGenome.GenomeID, C.InNode);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: connection in_node %d not in nodes"), InOutGenome.GenomeID, C.InNode);
 			return false;
 		}
 		if (!NodeIds.Contains(C.OutNode))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] Genome %d: connection out_node %d not in nodes"), InOutGenome.GenomeID, C.OutNode);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: connection out_node %d not in nodes"), InOutGenome.GenomeID, C.OutNode);
 			return false;
 		}
 	}
@@ -205,10 +211,14 @@ bool UNEATGenomeImporter::ValidateGenome(FNEATGenome& InOutGenome)
 	{
 		if (!C.bEnabled) DisabledCount++;
 	}
+	if (DisabledCount > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NEATGenomeImporter] Genome %d: %d disabled connections (excluded from evaluation)"), InOutGenome.GenomeID, DisabledCount);
+	}
 
 	InOutGenome.bIsValid = true;
-	UE_LOG(LogTemp, Log, TEXT("[NEATGenomeImporter] Genome %d validated: %d nodes, %d connections (%d disabled), inputs=%d outputs=%d"),
-		InOutGenome.GenomeID, InOutGenome.Nodes.Num(), InOutGenome.Connections.Num(), DisabledCount,
+	UE_LOG(LogTemp, Log, TEXT("[NEATGenomeImporter] Genome %d validated: nodes=%d connections=%d (enabled=%d) inputs=%d outputs=%d"),
+		InOutGenome.GenomeID, InOutGenome.Nodes.Num(), InOutGenome.Connections.Num(), InOutGenome.Connections.Num() - DisabledCount,
 		InOutGenome.NumInputs, InOutGenome.NumOutputs);
 	return true;
 }
