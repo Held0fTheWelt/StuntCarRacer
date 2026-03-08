@@ -30,6 +30,22 @@ Set `bFreshStart` on `UNEATTrainingManager` before calling `StartTraining()`:
 The chosen mode is written into `neat_contract.json` as `training_mode = "fresh" | "resume"`
 and logged at startup: `[NEATTrainingManager] TrainingMode: FRESH | RESUME`.
 
+## Generation Source of Truth (Resume Handshake)
+
+Unreal resets `CurrentGeneration = 0` at every `StartTraining()` call. On a resumed run, Python
+may export `generation_5_genomes.json`, but Unreal would try to load `generation_0_genomes.json`
+without the handshake. The fix is a canonical state file written by Python after every export.
+
+**Handshake flow:**
+1. Python exports `generation_{N}_genomes.json` and individual `genome_{id}.json` files.
+2. Python writes `{genome_dir}/training_state.json` with `{"exported_generation": N}`.
+3. Unreal calls `ReadExportedGeneration()` which reads this file; fails hard if missing.
+4. Unreal sets `CurrentGeneration = N` from the state file.
+5. Unreal validates `generation_{N}_genomes.json` exists (second hard gate).
+6. Unreal calls `LoadGenerationGenomes()` — now guaranteed to load the correct generation.
+
+This handshake is one-directional (Python → Unreal), deterministic, and fail-fast.
+
 ## Expected Artifacts (Saved/Training/)
 
 | File | Written by | Consumed by |
@@ -38,6 +54,7 @@ and logged at startup: `[NEATTrainingManager] TrainingMode: FRESH | RESUME`.
 | `NEAT/generation_{N}_genomes.json` | Python | Unreal (LoadGenerationGenomes) |
 | `NEAT/genome_{id}.json` | Python | Unreal (LoadGenerationGenomes) |
 | `NEAT/best_genome.json` | Unreal (FinalizeAndLoadBestGenome) | Unreal (LoadBestGenome) |
+| `NEAT/training_state.json` | Python (after every export) | Unreal (ReadExportedGeneration) |
 | `NEAT/neat_checkpoint_latest.pkl` | Python | Python (resume) |
 | `Fitness/generation_{N}.json` | Unreal (ExportFitnessValues) | Python (FitnessLoader) |
 | `Logs/python_training_*.log` | Python (via batch script) | Developer / Unreal log |
@@ -63,13 +80,19 @@ fitness, copies `genome_{id}.json` to `best_genome.json`, then calls `LoadBestGe
 ### Verifying Fresh Mode
 - Start with existing `neat_checkpoint_latest.pkl` in `Saved/Training/NEAT/`.
 - Set `bFreshStart = true`, start training.
-- Python log should say `[NEAT] Fresh mode: deleted checkpoint ...`.
+- Python log should say `[NEAT] Fresh mode: deleted checkpoint ...`, `deleted training state ...`.
 - First Python run should say `[NEAT] Fresh start: no checkpoint at ...` and export generation_0.
+- Python should write `training_state.json` with `exported_generation=0`.
+- Unreal log should say `Generation sync: CurrentGeneration=0 matches exported_generation=0`.
+- Unreal log should say `Import handshake confirmed: ... loading generation 0`.
 
 ### Verifying Resume Mode
-- Ensure `neat_checkpoint_latest.pkl` exists.
+- Ensure `neat_checkpoint_latest.pkl` exists (e.g. from a previous run with `last_exported=5`).
 - Set `bFreshStart = false` (default), start training.
 - Python log should say `[NEAT] Resumed run: checkpoint found at ...`.
+- Python should export `generation_6_genomes.json` and write `training_state.json` with `exported_generation=6`.
+- Unreal log should say `Generation sync: CurrentGeneration 0 -> 6 (from training_state.json; likely a resumed run)`.
+- Unreal log should say `Import handshake confirmed: ... loading generation 6`.
 
 ## Common Failure Signatures
 
@@ -85,6 +108,9 @@ fitness, copies `genome_{id}.json` to `best_genome.json`, then calls `LoadBestGe
 | `Missing backend / failed runtime assignment` | `UNEATGraphEvaluator::CreateFromGenome` returned nullptr — check activation functions in genome JSON |
 | Fitness stuck at 0 for all genomes | `OnAgentEpisodeDone` not being called — verify agents are registered and `Initialize()` was called |
 | `ERROR: Unknown training_mode 'X'` | Contract manifest has unexpected value; only "fresh" and "resume" are valid |
+| `HARD GATE: training_state.json is missing or invalid` | Python failed before writing state file; check Python log |
+| `HARD GATE: training_state.json says exported_generation=N but genome list not found` | training_state.json and genome files disagree; export incomplete or paths mismatched |
+| `Generation sync: CurrentGeneration 0 -> N` | Resume path working correctly; CurrentGeneration was corrected |
 
 ## Generation Numbering
 
