@@ -23,6 +23,23 @@
 | 14 | Population parity enforced | Manifest `population_size`; Python `create_or_validate_config(..., population_size)`; neat_config pop_size from manifest. |
 | 15 | Final best-genome handling correct | `FinalizeAndLoadBestGenome()`; Python exports best to `best_genome_path`; single source in contract. |
 
+## Evidence in logs (Task.md final proof required)
+
+For the flow to be considered closed, the following log evidence must appear when running the full path. Each line is the exact string (or pattern) to look for in the Output Log.
+
+| # | Requirement | Log evidence (category / message pattern) |
+|---|-------------|------------------------------------------|
+| 1 | PIE starts and widget/manager enter armed flow | `LogCarAIEditor`: `[NeatTrainingEditorWidget] PIE hook entered; PIE world captured` and workflow state `WaitingForRuntimeAgents` or `RegisteringAgents`. |
+| 2 | Runtime agents self-register into the runtime registry | `LogCarAIAgent`: `[RacingAgentRegistry] Agent registered. Total=N World=... Owner=...` (one per agent BeginPlay). |
+| 3 | Editor/widget consumes the registry, not world-scanning | `LogCarAIEditor`: `registry_count=N (registry-driven discovery)` and/or `Readiness passed: registry_count=N. Auto-registration with manager triggered`. No TObjectIterator in PollForRuntimeAgents. |
+| 4 | Manager registers agents passively without starting them | `LogCarAITraining`: `[NEATTrainingManager] Agent registered (RuntimeState=Registered; awaiting genome assignment and authorization). Total registered: N` — no "Initialize" or "authorization granted" in the same path. |
+| 5 | Generation genomes are loaded successfully | `LogCarAITraining`: `[NEATTrainingManager] Loaded N genomes for generation G (all validated, count matches PopulationSize); ready for batch evaluation`. |
+| 6 | Active batch agents assigned valid genome IDs and policy backends | `LogCarAITraining`: `[NEATTrainingManager] Genome assigned and authorization granted: agent_index=... genome_id=...`. |
+| 7 | Evaluation authorization granted only after assignment | Same as (6); order in code: `SetPolicyBackend(Evaluator)` then `GrantEvaluationAuthorization()` in same loop. Agent log: `[CarAIAgent] Evaluation authorization GRANTED. ... GenomeID=N`. |
+| 8 | First real agent step with GenomeID ≥ 0 and no fallback | `LogCarAIAgent`: `[Agent] First step this episode. RuntimeState=... GenomeID=N` with N ≥ 0. No `Using fallback forward drive` for that agent (fallback only when GenomeID < 0). |
+| 9 | Fitness export and next-generation continuation intact | `LogCarAITraining`: `[NEATTrainingManager] Exported fitness for generation G (...)` and `[NEATTrainingManager] Python evolution complete` and `training_state.json: exported_generation=G`. |
+| 10 | Resume and fresh flows both remain valid | Manifest contains `training_mode`: `"fresh"` or `"resume"`. Python stdout: `[NEAT] Training mode: fresh` or `resume`. Unreal: `Contract population parity: manifest population_size=N`. |
+
 ## Manual verification steps
 
 1. **Arm → PIE → registry → manager → start**  
