@@ -140,6 +140,34 @@ void UNeatTrainingEditorWidget::ArmTraining()
 	}
 }
 
+void UNeatTrainingEditorWidget::CancelArmedTraining()
+{
+	if (!bArmedForPIE && WorkflowState != ENeatTrainingWorkflowState::ArmedForPIE &&
+		WorkflowState != ENeatTrainingWorkflowState::WaitingForPIEWorld &&
+		WorkflowState != ENeatTrainingWorkflowState::WaitingForRuntimeAgents)
+	{
+		return;
+	}
+	// Clear discovery timer if we were waiting for agents.
+	if (GEditor && GEditor->GetEditorWorldContext().World())
+	{
+		GEditor->GetEditorWorldContext().World()->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+	}
+	AgentDiscoveryTimerHandle.Invalidate();
+	CachedPIEWorld.Reset();
+	bArmedForPIE = false;
+	if (TrainingManager && IsValid(TrainingManager))
+	{
+		SetWorkflowState(ENeatTrainingWorkflowState::ManagerInitialized);
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Armed training cancelled. Status: Manager ready."));
+	}
+	else
+	{
+		SetWorkflowState(ENeatTrainingWorkflowState::Idle);
+		UE_LOG(LogTemp, Log, TEXT("[NeatTrainingEditorWidget] Armed training cancelled."));
+	}
+}
+
 void UNeatTrainingEditorWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
@@ -446,6 +474,9 @@ void UNeatTrainingEditorWidget::RefreshStatus()
 		bTrainingInProgress = false;
 		RegisteredAgentCount = 0;
 		CurrentGeneration = 0;
+		bArmTrainingEnabled = false;
+		bRegisterAgentsEnabled = false;
+		bStartTrainingEnabled = false;
 		if (WorkflowState != ENeatTrainingWorkflowState::Idle)
 		{
 			SetWorkflowState(ENeatTrainingWorkflowState::Idle);
@@ -459,9 +490,11 @@ void UNeatTrainingEditorWidget::RefreshStatus()
 
 	bTrainingInProgress = TrainingManager->IsTraining();
 	CurrentGeneration = TrainingManager->GetCurrentGeneration();
-	// RegisteredAgentCount is authoritative from RegisterAgents(); do not reset here.
 
-	// Keep status text in sync with workflow state (e.g. TrainingRunning shows current generation)
+	bArmTrainingEnabled = !bTrainingInProgress;
+	bRegisterAgentsEnabled = (GetEditorOrPIEWorld() != nullptr);
+	bStartTrainingEnabled = (RegisteredAgentCount > 0 && !PythonExecutable.IsEmpty());
+
 	if (WorkflowState == ENeatTrainingWorkflowState::TrainingRunning)
 	{
 		LastStatusMessage = GetWorkflowStateDescription();

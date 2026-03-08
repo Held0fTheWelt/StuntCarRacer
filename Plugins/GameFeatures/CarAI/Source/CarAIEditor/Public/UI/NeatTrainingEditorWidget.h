@@ -106,37 +106,47 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
 	FString LastStatusMessage = TEXT("Not initialized");
 
-	// ===== Actions =====
+	/** True when "Arm Training" is valid (manager ready, not currently training). Use to enable primary action in UI. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
+	bool bArmTrainingEnabled = false;
+	/** True when "Register Agents" (manual fallback) is valid (manager + world available). Use to enable fallback button. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
+	bool bRegisterAgentsEnabled = false;
+	/** True when "Start Training" (manual fallback) is valid (manager + agents + Python). Use to enable fallback button. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Status")
+	bool bStartTrainingEnabled = false;
+
+	// ===== Actions (primary: Initialize Manager → Arm Training → Start PIE) =====
 
 	/**
 	 * Create or reuse the NEAT training manager for this editor session.
-	 * Safe to call multiple times — reuses the existing instance if valid.
-	 * Must be called before ArmTraining, RegisterAgents, or StartTraining.
+	 * Safe to call multiple times. Must be called before Arm Training or any manual fallback.
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void InitializeManager();
 
 	/**
-	 * Arm training for automatic start when PIE and runtime agents are ready.
-	 * Call this before starting PIE; the tool will then wait for PIE world and
-	 * GameFeature-added agents, then auto-register and auto-start training.
-	 * Label in UI can be "Arm Training", "Start When Ready", or "Queue Training For PIE".
+	 * Primary action: Arm training for automatic start when PIE and runtime agents are ready.
+	 * After this, start PIE; the tool will wait for PIE world and GameFeature-added agents, then auto-register and auto-start.
+	 * Label in UI: "Arm Training", "Start When Ready", or "Arm Training For PIE".
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void ArmTraining();
 
+	/** Cancel an armed training request (stops waiting for PIE / agents). Safe to call anytime. */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
+	void CancelArmedTraining();
+
 	/**
-	 * Find and register all URacingAgentComponent instances in the current
-	 * PIE or editor world. Unregisters previous agents first.
-	 * Requires the manager to be initialized.
+	 * Manual fallback: register agents in current world. Use when PIE is already running and you did not use Arm Training.
+	 * Disable this button when bRegisterAgentsEnabled is false.
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void RegisterAgents();
 
 	/**
-	 * Apply current config and start NEAT training.
-	 * Fails loudly if: no manager, no agents, empty Python executable.
-	 * Can be called manually (secondary workflow) or by the armed auto-start path.
+	 * Manual fallback: start training now. Use only when agents are already registered (e.g. after manual Register Agents).
+	 * Disable this button when bStartTrainingEnabled is false.
 	 */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "NEAT Training")
 	void StartTraining();
