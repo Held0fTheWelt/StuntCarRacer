@@ -20,6 +20,7 @@ URacingAgentComponent::URacingAgentComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+	PrimaryComponentTick.TickInterval = 0.f; // Run every frame when active
 	// Not auto-activated: manager (or Blueprint) must call Initialize() to activate and start stepping.
 	bAutoActivate = false;
 }
@@ -58,8 +59,9 @@ void URacingAgentComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Deterministic per-tick stepping: when active and episode not done, run one policy step.
-	if (!bEpisodeDone && DeltaTime > 0.f)
+	// Single runtime stepping path: when active and episode not done, run one policy step each tick.
+	const bool bShouldStep = IsActive() && !bEpisodeDone && DeltaTime > 0.f;
+	if (bShouldStep)
 	{
 		StepOnce(DeltaTime);
 	}
@@ -71,7 +73,8 @@ void URacingAgentComponent::Initialize()
 	SetComponentTickEnabled(true);
 	ResetEpisode();
 
-	UE_LOG(LogTemp, Log, TEXT("[%s] Agent initialized (active, stepping enabled)"), *GetAgentLogId());
+	UE_LOG(LogTemp, Log, TEXT("[%s] Agent initialized"), *GetAgentLogId());
+	UE_LOG(LogTemp, Log, TEXT("[%s] Agent activated for evaluation; StepOnce will run each tick until episode ends"), *GetAgentLogId());
 }
 
 // ============================================================================
@@ -117,10 +120,7 @@ void URacingAgentComponent::ResetEpisode()
 	ResetEpisodeAccumulators();
 	ResetAdaptiveRays();
 
-	if (bEnableLogging)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[%s] Episode reset at Player Start"), *GetAgentLogId());
-	}
+	UE_LOG(LogTemp, Log, TEXT("[%s] Episode reset; evaluation active (stepping each tick)"), *GetAgentLogId());
 }
 
 void URacingAgentComponent::ResetEpisodeAccumulators()
@@ -251,10 +251,21 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		return;
 	}
 
+	AActor* Vehicle = GetVehicleActor();
+	if (!Vehicle)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[%s] StepOnce: no vehicle actor; skipping step"), *GetAgentLogId());
+		return;
+	}
+
 	// First step this episode: log that stepping has started
 	if (EpisodeStepCount == 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[%s] Agent started stepping (GenomeID=%d)"), *GetAgentLogId(), GenomeID);
+		UE_LOG(LogTemp, Log, TEXT("[%s] Agent step executing (first step this episode, GenomeID=%d)"), *GetAgentLogId(), GenomeID);
+	}
+	else if (bEnableLogging && (EpisodeStepCount % 100 == 0))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[%s] Agent step executing (step %d)"), *GetAgentLogId(), EpisodeStepCount);
 	}
 
 	// 1. Build Observation
@@ -262,26 +273,50 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 	LastObservation = Obs;
 
 	// 2. Progress along track (spline) or path length (fallback)
-	FVector CurrentLoc = GetVehicleActor()->GetActorLocation();
+	FVector CurrentLoc = Vehicle->GetActorLocation();
 	ThisStepProgressDeltaCm = GetProgressDeltaCmAndUpdate(CurrentLoc);
 	AccumulatedProgressCm += ThisStepProgressDeltaCm;
 
 	// 3. Compute Reward (uses ThisStepProgressDeltaCm for distance)
 	FRewardBreakdown Reward = ComputeReward(Obs, DeltaTime);
 
-	// 4. Get Action from policy (PolicyBackend e.g. NEAT first, else PolicyNetwork)
+	// 4. Get Action from policy. NEAT (GenomeID >= 0): only PolicyBackend; no fallback to avoid masking broken integration.
 	FVehicleAction Action;
 	TArray<float> PolicyOutput;
 	bool bGotOutput = false;
-	if (PolicyBackend && PolicyBackend->IsValid())
+
+	if (GenomeID >= 0)
 	{
-		bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
+		// NEAT evaluation: use only PolicyBackend; do not fall back to PolicyNetwork.
+		if (PolicyBackend && PolicyBackend->IsValid())
+		{
+			bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
+		}
+		if (!bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
+		{
+			bHasLoggedPolicyMissingThisEpisode = true;
+			UE_LOG(LogTemp, Error, TEXT("[%s] Missing policy backend during NEAT evaluation (GenomeID=%d). Agent will not move. Assign backend via manager or LoadBestGenome."), *GetAgentLogId(), GenomeID);
+		}
+		else if (PolicyBackend && PolicyBackend->IsValid() && !bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
+		{
+			bHasLoggedPolicyMissingThisEpisode = true;
+			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
+		}
 	}
-	if (!bGotOutput && PolicyNetwork)
+	else
 	{
-		PolicyNetwork->ForwardPolicy(Obs.Vector, PolicyOutput);
-		bGotOutput = (PolicyOutput.Num() == 3);
+		// Non-NEAT: try PolicyBackend then PolicyNetwork.
+		if (PolicyBackend && PolicyBackend->IsValid())
+		{
+			bGotOutput = PolicyBackend->Evaluate(Obs.Vector, PolicyOutput);
+		}
+		if (!bGotOutput && PolicyNetwork)
+		{
+			PolicyNetwork->ForwardPolicy(Obs.Vector, PolicyOutput);
+			bGotOutput = (PolicyOutput.Num() == 3);
+		}
 	}
+
 	if (bGotOutput && PolicyOutput.Num() >= 3)
 	{
 		// Clamp at agent layer (not inside backend)
@@ -291,24 +326,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 	}
 	else
 	{
-		if (PolicyBackend && PolicyBackend->IsValid() && !bGotOutput && !bHasLoggedPolicyMissingThisEpisode)
-		{
-			bHasLoggedPolicyMissingThisEpisode = true;
-			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT inference failed (e.g. observation size mismatch). Check evaluator logs."), *GetAgentLogId());
-		}
-		else if (!bHasLoggedPolicyMissingThisEpisode)
-		{
-			bHasLoggedPolicyMissingThisEpisode = true;
-			if (GenomeID >= 0)
-			{
-				UE_LOG(LogTemp, Error, TEXT("[%s] NEAT evaluation has no policy backend (GenomeID=%d). Agent will not move. Load genome or set PolicyNetwork."), *GetAgentLogId(), GenomeID);
-			}
-			else
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[%s] No PolicyNetwork set. Using fallback forward drive for gameplay."), *GetAgentLogId());
-			}
-		}
-		// NEAT evaluation (GenomeID >= 0): zero action so failure is visible
+		// No valid output: NEAT path uses zero action; non-NEAT may use fallback drive with explicit log.
 		if (GenomeID >= 0)
 		{
 			Action.Steer = 0.f;
@@ -317,6 +335,11 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		}
 		else
 		{
+			if (!bHasLoggedPolicyMissingThisEpisode)
+			{
+				bHasLoggedPolicyMissingThisEpisode = true;
+				UE_LOG(LogTemp, Warning, TEXT("[%s] No policy backend or network set. Using fallback forward drive (non-NEAT gameplay only)."), *GetAgentLogId());
+			}
 			Action.Steer = 0.f;
 			Action.Throttle = 0.5f;
 			Action.Brake = 0.f;
@@ -357,7 +380,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 
 		OnEpisodeDone.Broadcast(EpisodeStats);
 
-		UE_LOG(LogTemp, Log, TEXT("[%s] Episode done: %s (Fitness: %.2f, Steps: %d, Progress: %.1fm)"),
+		UE_LOG(LogTemp, Log, TEXT("[%s] Episode completed: %s (Fitness: %.2f, Steps: %d, Progress: %.1fm)"),
 			*GetAgentLogId(), *TermReason, EpisodeStats.NEATFitness, EpisodeStats.StepCount,
 			EpisodeStats.DistanceTraveledCm / 100.f);
 		UE_LOG(LogTemp, Log, TEXT("[%s] Reward breakdown: Distance=%.3f Survival=%.3f Speed=%.3f Smoothness=%.3f Collision=%.3f Gap=%.3f Total=%.3f"),

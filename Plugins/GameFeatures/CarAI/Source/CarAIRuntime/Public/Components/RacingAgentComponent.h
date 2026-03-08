@@ -13,12 +13,18 @@ class UPolicyBackend;
 /**
  * Racing AI Agent with Adaptive Ray-based Vision and NEAT Evolution.
  *
- * Runtime stepping behavior:
- * - Not auto-activated: call Initialize() to activate and start evaluation.
- * - Initialize(): Activates component, enables tick, calls ResetEpisode() (spawn at Player Start).
- * - Each tick: StepOnce(DeltaTime) is called when the episode is not done (per-tick stepping).
- * - ResetEpisode(): Respawns at Player Start and resets accumulators; stepping continues on next tick.
- * - If PolicyNetwork is null during NEAT evaluation (GenomeID >= 0): error is logged and agent does not move.
+ * Runtime stepping lifecycle (C++ deterministic path):
+ * 1. Initialization: Constructor sets bAutoActivate = false; BeginPlay() sets up ray state only.
+ * 2. Activation: Call Initialize() (or equivalent) to enter evaluation. Initialize() calls Activate(),
+ *    SetComponentTickEnabled(true), and ResetEpisode(). This is the only way to start stepping.
+ * 3. Evaluation-active state: After Initialize(), the component is active and ticking; each
+ *    TickComponent() invokes StepOnce(DeltaTime) when the episode is not done.
+ * 4. Repeated stepping: StepOnce() runs every tick (PrePhysics) until the episode terminates;
+ *    then no further steps until ResetEpisode() is called (e.g. by the training manager).
+ *
+ * Policy: NEAT evaluation (GenomeID >= 0) uses only PolicyBackend; no fallback to PolicyNetwork or
+ * drive-forward. Missing backend is logged and agent applies zero action. Non-NEAT (GenomeID < 0)
+ * may use PolicyBackend then PolicyNetwork, then optional fallback drive with explicit log.
  *
  * Sensors: 8 Adaptive Rays + IMU + Vehicle State. Training: NEAT fitness = track progress (m) + speed bonus.
  */
