@@ -418,6 +418,28 @@ def main():
 
     # Single canonical checkpoint path (contract checkpoint_dir + fixed filename)
     checkpoint_path = get_checkpoint_path(checkpoint_dir_path)
+
+    # training_mode: explicit fresh-vs-resume control from Unreal manifest.
+    # "fresh" = discard checkpoint and best genome before running (clean slate).
+    # "resume" = load latest checkpoint if available (default).
+    training_mode = contract.get("training_mode", "resume")
+    print(f"[NEAT] Training mode: {training_mode}")
+    if training_mode == "fresh":
+        if checkpoint_path.is_file():
+            checkpoint_path.unlink()
+            print(f"[NEAT] Fresh mode: deleted checkpoint {checkpoint_path}")
+        else:
+            print(f"[NEAT] Fresh mode: no checkpoint to delete at {checkpoint_path}")
+        best_genome_path_val = contract.get("best_genome_path", "")
+        if best_genome_path_val and Path(best_genome_path_val).is_file():
+            Path(best_genome_path_val).unlink()
+            print(f"[NEAT] Fresh mode: deleted best genome {best_genome_path_val}")
+    elif training_mode == "resume":
+        print(f"[NEAT] Resume mode: will load checkpoint if found at {checkpoint_path}")
+    else:
+        print(f"ERROR: Unknown training_mode '{training_mode}'; expected 'fresh' or 'resume'", file=sys.stderr)
+        sys.exit(1)
+
     resolved_checkpoint = find_checkpoint(checkpoint_dir_path)
 
     if resolved_checkpoint is None:
