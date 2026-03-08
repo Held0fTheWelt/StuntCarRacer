@@ -269,6 +269,8 @@ void URacingAgentComponent::ResetEpisode()
 
 	const float HeightOffsetCm = bEnableForcedForwardDiagnostic ? DiagnosticSpawnHeightOffsetCm : SpawnHeightOffsetCm;
 	SpawnLoc.Z += HeightOffsetCm;
+	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Reset: height_offset_cm=%.0f SpawnLoc_final=%s"),
+		*GetAgentLogId(), HeightOffsetCm, *SpawnLoc.ToString());
 	if (bEnableForcedForwardDiagnostic && HeightOffsetCm != SpawnHeightOffsetCm)
 	{
 		UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Reset: diagnostic spawn height override %.0f cm (normal=%.0f)."), *GetAgentLogId(), HeightOffsetCm, SpawnHeightOffsetCm);

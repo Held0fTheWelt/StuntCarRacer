@@ -122,6 +122,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "1"))
 	int32 ActionSize = 3;
 
+	/** Distance (cm) to stagger agents along the track spline at spawn. Agent i spawns at i * AgentSpawnStaggerCm. Default 500 cm (5 m). */
+	UPROPERTY(EditAnywhere, Category = "Spawning")
+	float AgentSpawnStaggerCm = 500.f;
+
 	// ===== Training Control =====
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
@@ -262,6 +266,9 @@ private:
 	UPROPERTY() float EvaluationTimeElapsed = 0.f;
 	UPROPERTY() FTimerHandle EvaluationTickTimer;
 	UPROPERTY() bool bWaitingForPython = false;
+
+	/** When true, training was stopped/cancelled; late OnPythonEvolutionComplete callbacks are ignored to avoid crash (e.g. divide-by-zero when Agents.Num()==0). Cleared on StartTraining(). */
+	UPROPERTY() bool bStopRequested = false;
 
 	/** Batch mode: index into CurrentGenomes for the start of the current batch */
 	UPROPERTY() int32 CurrentBatchStartIndex = 0;

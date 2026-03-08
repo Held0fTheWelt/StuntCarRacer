@@ -29,6 +29,8 @@ void UNEATTrainingManager::StartTraining()
 		return;
 	}
 
+	bStopRequested = false;
+
 	if (Agents.Num() == 0)
 	{
 		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] No agents registered!"));
@@ -82,7 +84,8 @@ void UNEATTrainingManager::StopTraining()
 		return;
 	}
 
-	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Stopping training..."));
+	bStopRequested = true;
+	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Stop requested; any late Python completion callback will be ignored."));
 
 	// Stop evaluation timer
 	if (GetWorld())
@@ -434,6 +437,10 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 		const FNEATGenome& Genome = CurrentGenomes[GenomeIndex];
 		Agent->GenomeID = Genome.GenomeID;
 		Agent->Generation = CurrentGeneration;
+
+		// Stagger agents along the track to prevent spawn overlap collisions.
+		Agent->SpawnDistanceAlongTrackCm = (float)i * AgentSpawnStaggerCm;
+		UE_LOG(LogTemp, Display, TEXT("[NEATTrainingManager] Agent %d: SpawnDistanceCm=%.0f (stagger %.0f cm)"), i, Agent->SpawnDistanceAlongTrackCm, AgentSpawnStaggerCm);
 
 		UNEATGraphEvaluator* Evaluator = UNEATGraphEvaluator::CreateFromGenome(this, Genome);
 		if (Evaluator)
@@ -904,7 +911,22 @@ int32 UNEATTrainingManager::ReadExportedGeneration() const
 
 void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 {
+	if (bStopRequested)
+	{
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Late Python completion callback ignored (training was already stopped/cancelled)."));
+		bWaitingForPython = false;
+		return;
+	}
+
 	bWaitingForPython = false;
+
+	if (Agents.Num() <= 0)
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Zero-agent guard: OnPythonEvolutionComplete called with no registered agents (Agents.Num()=%d). Aborting to avoid divide-by-zero; ignoring this completion."), Agents.Num());
+		return;
+	}
+
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution completion callback accepted (generation=%d, agents=%d)."), CurrentGeneration, Agents.Num());
 
 	if (!bSuccess)
 	{
@@ -969,11 +991,19 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution complete: generation=%d, %d genomes loaded, %d agents registered"),
 		CurrentGeneration, CurrentGenomes.Num(), Agents.Num());
 
+	// Hard guard: no batch computation when agent count is zero (prevents divide-by-zero).
+	if (Agents.Num() <= 0)
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Zero-agent guard: cannot compute batch count (Agents.Num()=%d). Aborting gracefully."), Agents.Num());
+		return;
+	}
+
 	CurrentBatchStartIndex = 0;
 	if (CurrentGenomes.Num() > Agents.Num())
 	{
-		const int32 NumBatches = (CurrentGenomes.Num() + Agents.Num() - 1) / Agents.Num();
-		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch mode: %d genomes, %d agents; evaluating in %d batch(es)"), CurrentGenomes.Num(), Agents.Num(), NumBatches);
+		const int32 NumAgents = Agents.Num();
+		const int32 NumBatches = (CurrentGenomes.Num() + NumAgents - 1) / NumAgents;
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch mode: %d genomes, %d agents; evaluating in %d batch(es)"), CurrentGenomes.Num(), NumAgents, NumBatches);
 	}
 	AssignGenomesToAgents();
 
