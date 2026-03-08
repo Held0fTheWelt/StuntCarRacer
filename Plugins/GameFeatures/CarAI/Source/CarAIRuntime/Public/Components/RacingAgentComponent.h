@@ -269,6 +269,8 @@ protected:
 	UPROPERTY() bool bHasLoggedPolicyMissingThisEpisode = false;
 	/** Log NEAT observation schema once per episode */
 	UPROPERTY() bool bHasLoggedNEATSchemaThisEpisode = false;
+	/** Log once when skipping step because NEAT mode but no backend (readiness failure) */
+	UPROPERTY() bool bHasLoggedNEATNoBackendThisEpisode = false;
 
 	// ===== Adaptive Ray State =====
 

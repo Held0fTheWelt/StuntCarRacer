@@ -132,11 +132,9 @@ void UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
 	Agents.Add(Agent);
 	Agent->OnEpisodeDone.AddDynamic(this, &UNEATTrainingManager::OnAgentEpisodeDone);
 
-	// Activate component and start stepping loop (Initialize = Activate + ResetEpisode + tick enabled)
-	Agent->Initialize();
-
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Registered agent %d (Total: %d)"),
-		Agent->GenomeID, Agents.Num());
+	// Registration is passive: store agent, bind events, do NOT activate or start stepping.
+	// Evaluation starts only when genomes are loaded and StartEpisodeEvaluation() runs.
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Registered agent (idle; evaluation will start when genomes are loaded and assigned). Total: %d"), Agents.Num());
 }
 
 void UNEATTrainingManager::UnregisterAgent(URacingAgentComponent* Agent)
@@ -427,6 +425,22 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 void UNEATTrainingManager::StartEpisodeEvaluation()
 {
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting episode evaluation (Gen %d)"), CurrentGeneration);
+
+	// Activate agents only when genomes are assigned and we are about to run episodes (no stepping before this).
+	int32 ActivatedCount = 0;
+	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
+	{
+		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
+		if (Agent && !Agent->IsActive())
+		{
+			Agent->Initialize();
+			ActivatedCount++;
+		}
+	}
+	if (ActivatedCount > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Evaluation started for %d agent(s) (genomes assigned; stepping begins)."), ActivatedCount);
+	}
 
 	// Reset only active batch agents (agents outside active batch are already force-ended in AssignGenomesToAgents)
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)

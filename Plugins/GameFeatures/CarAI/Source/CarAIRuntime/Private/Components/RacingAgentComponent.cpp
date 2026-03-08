@@ -59,6 +59,18 @@ void URacingAgentComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// NEAT evaluation: do not step until a policy backend is assigned (no stepping with GenomeID >= 0 and no backend).
+	const bool bNEATModeWithoutBackend = (GenomeID >= 0 && !HasNEATPolicyBackend());
+	if (bNEATModeWithoutBackend)
+	{
+		if (!bHasLoggedNEATNoBackendThisEpisode)
+		{
+			bHasLoggedNEATNoBackendThisEpisode = true;
+			UE_LOG(LogTemp, Error, TEXT("[%s] NEAT evaluation mode (GenomeID=%d) but no policy backend assigned; skipping StepOnce until backend is set."), *GetAgentLogId(), GenomeID);
+		}
+		return;
+	}
+
 	// Single runtime stepping path: when active and episode not done, run one policy step each tick.
 	const bool bShouldStep = IsActive() && !bEpisodeDone && DeltaTime > 0.f;
 	if (bShouldStep)
@@ -132,6 +144,7 @@ void URacingAgentComponent::ResetEpisodeAccumulators()
 	StuckTimeAccum = 0.f;
 	bHasLoggedPolicyMissingThisEpisode = false;
 	bHasLoggedNEATSchemaThisEpisode = false;
+	bHasLoggedNEATNoBackendThisEpisode = false;
 
 	AActor* Vehicle = GetVehicleActor();
 	EpisodeStartLocation = Vehicle ? Vehicle->GetActorLocation() : FVector::ZeroVector;
