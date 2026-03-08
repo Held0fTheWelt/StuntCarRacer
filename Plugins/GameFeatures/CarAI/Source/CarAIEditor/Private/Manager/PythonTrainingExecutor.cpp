@@ -1,12 +1,14 @@
 #include "Manager/PythonTrainingExecutor.h"
 
 #include "Misc/Paths.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Async/Async.h"
 #include "Misc/FileHelper.h"
 #include "HAL/PlatformProcess.h"
-#include "HAL/PlatformFilemanager.h"
 #include "Misc/DateTime.h"
+
+/** Canonical relative path from ProjectPluginsDir to CarAI Python scripts. Single source for script resolution. */
+static const TCHAR* CarAIPythonContentRelativePath = TEXT("GameFeatures/CarAI/Content/Python");
 
 UPythonTrainingExecutor::UPythonTrainingExecutor()
 {
@@ -21,29 +23,28 @@ FString UPythonTrainingExecutor::FindPythonScript(const FString& ScriptName) con
 		return FString();
 	}
 
-	// Absolute path: use as-is if file exists
 	if (!FPaths::IsRelative(ScriptName))
 	{
 		if (FPaths::FileExists(ScriptName))
 		{
 			return ScriptName;
 		}
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Script path is absolute but file not found: %s"), *ScriptName);
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Script path is absolute but file not found: %s"), *ScriptName);
 		return FString();
 	}
 
-	// Relative: resolve against Plugins/GameFeatures/CarAI/Content/Python (script name only, no nested Content/Python)
+	// Relative: resolve against CarAI plugin Content/Python (filename only; strip any Content/Python prefix)
 	FString ScriptNameOnly = ScriptName;
 	ScriptNameOnly.ReplaceInline(TEXT("Content/Python/"), TEXT(""));
 	ScriptNameOnly.ReplaceInline(TEXT("Content\\Python\\"), TEXT(""));
-	FString PluginContentDir = FPaths::ProjectPluginsDir() / TEXT("GameFeatures/CarAI/Content/Python");
-	FString ScriptPath = FPaths::Combine(PluginContentDir, ScriptNameOnly);
+	FString PluginPythonDir = FPaths::Combine(FPaths::ProjectPluginsDir(), CarAIPythonContentRelativePath);
+	FString ScriptPath = FPaths::Combine(PluginPythonDir, ScriptNameOnly);
 
 	if (FPaths::FileExists(ScriptPath))
 	{
 		return ScriptPath;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Script not found at %s (resolved from %s)"), *ScriptPath, *ScriptName);
+	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Script not found at %s (resolved from %s)"), *ScriptPath, *ScriptName);
 	return FString();
 }
 
@@ -53,14 +54,10 @@ FString UPythonTrainingExecutor::FindPythonExecutable(const FString& ExecutableN
 	{
 		return TEXT("python");
 	}
-	
-	// Wenn absoluter Pfad, verwende diesen
 	if (FPaths::FileExists(ExecutableName))
 	{
 		return ExecutableName;
 	}
-	
-	// Ansonsten verwende als-is (wird aus PATH genommen)
 	return ExecutableName;
 }
 
@@ -68,29 +65,25 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 {
 	if (bTrainingInProgress)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training already in progress"));
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training already in progress"));
 		return false;
 	}
 
 	FString ScriptPath = FindPythonScript(PythonScriptPath);
 	if (ScriptPath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script not found: %s"), *PythonScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Script not found: %s"), *PythonScriptPath);
 		return false;
 	}
 
 	FString PythonExe = FindPythonExecutable(PythonExecutablePath);
-	
-	// Erstelle Command-Line
 	FString CommandLine = FString::Printf(TEXT("\"%s\""), *ScriptPath);
-	
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Starte Training: %s %s"), *PythonExe, *CommandLine);
+	UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Starting training: %s %s"), *PythonExe, *CommandLine);
 
 	bTrainingInProgress = true;
 	LastOutput = TEXT("");
 	LastExitCode = -1;
 
-	// Starte Prozess (synchrone Ausführung)
 	TrainingProcessHandle = FPlatformProcess::CreateProc(
 		*PythonExe,
 		*CommandLine,
@@ -107,33 +100,27 @@ bool UPythonTrainingExecutor::ExecuteTraining(const FString& PythonScriptPath, c
 
 	if (!TrainingProcessHandle.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to start process"));
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Failed to start process"));
 		bTrainingInProgress = false;
 		return false;
 	}
 
-	// Warte auf Fertigstellung
 	FPlatformProcess::WaitForProc(TrainingProcessHandle);
-	
-	// Hole Exit-Code
 	int32 ReturnCode = 0;
 	FPlatformProcess::GetProcReturnCode(TrainingProcessHandle, &ReturnCode);
 	LastExitCode = ReturnCode;
-	
-	// Cleanup
 	FPlatformProcess::CloseProc(TrainingProcessHandle);
 	TrainingProcessHandle.Reset();
 	bTrainingInProgress = false;
 
 	bool bSuccess = (LastExitCode == 0);
-	
 	if (bSuccess)
 	{
-		UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training completed successfully (Exit Code: %d)"), LastExitCode);
+		UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Training completed successfully (Exit Code: %d)"), LastExitCode);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training failed (Exit Code: %d)"), LastExitCode);
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training failed (Exit Code: %d)"), LastExitCode);
 	}
 
 	OnTrainingCompleted.Broadcast(bSuccess);
@@ -151,7 +138,7 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 
 	if (ManifestPath.IsEmpty() || !FPaths::FileExists(ManifestPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Manifest path missing or file not found: %s"), *ManifestPath);
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Manifest path missing or file not found: %s"), *ManifestPath);
 		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
@@ -159,14 +146,15 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 	FString ScriptPath = FindPythonScript(PythonScriptPath);
 	if (ScriptPath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Script not found: %s"), *PythonScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Script not found: %s"), *PythonScriptPath);
 		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
 
 	FString PythonExe = FindPythonExecutable(PythonExecutablePath);
+	UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Resolved script=%s manifest=%s (contract source of truth)"), *ScriptPath, *ManifestPath);
 
-	FString LogDir = FPaths::ProjectSavedDir() / TEXT("Training/Logs");
+	FString LogDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Training"), TEXT("Logs"));
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	if (!PlatformFile.DirectoryExists(*LogDir))
 	{
@@ -175,9 +163,9 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 	FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 	PythonLogFilePath = LogDir / FString::Printf(TEXT("python_training_%s.log"), *Timestamp);
 
-	FString BatchScriptPath = LogDir / FString::Printf(TEXT("run_training_%s.bat"), *Timestamp);
+	FString BatchScriptPath = FPaths::Combine(LogDir, FString::Printf(TEXT("run_training_%s.bat"), *Timestamp));
 	FString ScriptDir = FPaths::GetPath(ScriptPath);
-	// Run: python script --manifest <path> (all paths quoted)
+	// Invocation: python <script> --manifest <manifest_path> (Unreal contract; Python must use only these values)
 	FString BatchScriptContent = FString::Printf(
 		TEXT("@echo off\n")
 		TEXT("cd /d \"%s\"\n")
@@ -193,15 +181,13 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 
 	if (!FFileHelper::SaveStringToFile(BatchScriptContent, *BatchScriptPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to write batch script: %s"), *BatchScriptPath);
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Failed to write batch script: %s"), *BatchScriptPath);
 		OnTrainingCompleted.Broadcast(false);
 		return;
 	}
 
 	FString CommandLine = FString::Printf(TEXT("/c \"%s\""), *BatchScriptPath);
-
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Starting training (script=%s manifest=%s)"), *ScriptPath, *ManifestPath);
-	UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Log file: %s"), *PythonLogFilePath);
+	UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Log file: %s"), *PythonLogFilePath);
 
 	bTrainingInProgress = true;
 	LastOutput = TEXT("");
@@ -239,37 +225,26 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 			return;
 		}
 
-		// Periodisch Log-Datei lesen während Prozess läuft
 		while (FPlatformProcess::IsProcRunning(ProcessHandle))
 		{
 			ReadPythonLogToUnrealLog();
-			FPlatformProcess::Sleep(0.5f); // Alle 0.5 Sekunden prüfen
+			FPlatformProcess::Sleep(0.5f);
 		}
-
-		// Letzte Lesung nach Prozess-Ende
 		ReadPythonLogToUnrealLog();
-
-		// Lese komplette Log-Datei für LastOutput
 		if (FPaths::FileExists(PythonLogFilePath))
 		{
 			FFileHelper::LoadFileToString(LastOutput, *PythonLogFilePath);
 		}
 
-		// Warte auf Fertigstellung (sollte bereits fertig sein)
 		FPlatformProcess::WaitForProc(ProcessHandle);
-		
 		int32 ExitCode = 0;
 		FPlatformProcess::GetProcReturnCode(ProcessHandle, &ExitCode);
 		FPlatformProcess::CloseProc(ProcessHandle);
-
-		// Lösche Batch-Script (cleanup)
 		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 		if (PlatformFile.FileExists(*BatchScriptPathToDelete))
 		{
 			PlatformFile.DeleteFile(*BatchScriptPathToDelete);
 		}
-
-		// Callback auf Game-Thread
 		AsyncTask(ENamedThreads::GameThread, [this, ExitCode]()
 		{
 			bTrainingInProgress = false;
@@ -278,13 +253,13 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 			
 			if (bSuccess)
 			{
-				UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Training completed successfully (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Training completed successfully (Exit Code: %d)"), ExitCode);
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training failed (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training failed (Exit Code: %d)"), ExitCode);
 			}
-			UE_LOG(LogTemp, Log, TEXT("PythonTrainingExecutor: Full output: %s"), *PythonLogFilePath);
+			UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Full output: %s"), *PythonLogFilePath);
 			
 			OnTrainingCompleted.Broadcast(bSuccess);
 		});
@@ -318,8 +293,7 @@ void UPythonTrainingExecutor::StopTraining()
 	{
 		return;
 	}
-
-	UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Stopping training..."));
+	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Stopping training..."));
 	FPlatformProcess::TerminateProc(TrainingProcessHandle, true);
 	FPlatformProcess::CloseProc(TrainingProcessHandle);
 	TrainingProcessHandle.Reset();
@@ -382,20 +356,20 @@ void UPythonTrainingExecutor::ShowPythonLog()
 {
 	if (PythonLogFilePath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: No log file (path empty)"));
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] No log file (path empty)"));
 		return;
 	}
 
 	if (!FPaths::FileExists(PythonLogFilePath))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Log file not found: %s"), *PythonLogFilePath);
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Log file not found: %s"), *PythonLogFilePath);
 		return;
 	}
 
 	FString LogContent;
 	if (!FFileHelper::LoadFileToString(LogContent, *PythonLogFilePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("PythonTrainingExecutor: Failed to read log file: %s"), *PythonLogFilePath);
+		UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Failed to read log file: %s"), *PythonLogFilePath);
 		return;
 	}
 

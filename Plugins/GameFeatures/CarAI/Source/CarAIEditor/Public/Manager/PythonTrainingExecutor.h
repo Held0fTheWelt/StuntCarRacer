@@ -7,7 +7,9 @@
 
 /**
  * Runs Python training scripts and monitors the process.
- * Script path is relative to Plugins/GameFeatures/CarAI/Content/Python (e.g. "train_neat.py").
+ * Script path: filename only (e.g. train_neat.py). Resolved relative to
+ * CarAI plugin Content/Python: <ProjectPlugins>/GameFeatures/CarAI/Content/Python/<script>.
+ * All NEAT paths and config are passed via the manifest file written by NEATTrainingManager.
  */
 UCLASS()
 class CARAIEDITOR_API UPythonTrainingExecutor : public UObject
@@ -21,7 +23,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	bool ExecuteTraining(const FString& PythonScriptPath, const FString& PythonExecutablePath = TEXT("python"));
 
-	/** Runs Python training script asynchron. Pass manifest path (neat_contract.json) written by NEATTrainingManager. */
+	/** Runs Python training script asynchron. ManifestPath must be the neat_contract.json path written by NEATTrainingManager (source of truth for Python). */
 	UFUNCTION(BlueprintCallable, Category = "Python Training")
 	void ExecuteTrainingAsync(const FString& PythonScriptPath, const FString& PythonExecutablePath, const FString& ManifestPath);
 
@@ -68,7 +70,7 @@ private:
 	FString PythonLogFilePath;
 	int64 LastLogReadPosition = 0;
 
-	/** Resolves script to absolute path. Input: "train_neat.py" or "Content/Python/train_neat.py" -> Plugin Content/Python + script name. */
+	/** Resolves script to absolute path. Input: filename only (e.g. train_neat.py); strips any Content/Python prefix. Result: Plugin Content/Python + filename. */
 	FString FindPythonScript(const FString& ScriptName) const;
 	FString FindPythonExecutable(const FString& ExecutableName) const;
 	void ReadPythonLogToUnrealLog();

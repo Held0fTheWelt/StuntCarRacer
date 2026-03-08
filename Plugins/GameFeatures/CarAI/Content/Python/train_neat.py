@@ -4,14 +4,17 @@ NEAT Training for Racing AI
 =============================
 
 Uses NEAT-Python to evolve neural networks for racing car control.
-Unreal is the source of truth: run with --manifest <path> to neat_contract.json
-written by NEATTrainingManager. No fallback paths; contract must be provided.
+Unreal is the single source of truth: run with --manifest <path> to neat_contract.json
+written by NEATTrainingManager. All paths and sizes come from the manifest; no hardcoded
+NEAT directories or fallbacks.
 
 Workflow:
-1. Load contract from Unreal (paths, observation_size, action_size)
+1. Load contract from Unreal (fitness_dir, genome_dir, checkpoint_dir, best_genome_path, observation_size, action_size)
 2. Load fitness values from contract fitness_dir
 3. NEAT evolves genomes; export to contract genome_dir
 4. Unreal loads genomes and repeats
+
+File naming (must match Unreal): generation_{N}.json, generation_{N}_genomes.json, genome_{id}.json, best_genome.json
 
 Requirements:
     pip install neat-python
@@ -29,10 +32,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 # ============================================================================
-# Contract (loaded from Unreal manifest; no hardcoded fallbacks)
+# Contract: all values from Unreal manifest only (no hardcoded NEAT paths)
 # ============================================================================
 
 CONFIG_FILE = "neat_config.txt"
+REQUIRED_CONTRACT_KEYS = ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size")
 
 # ============================================================================
 # NEAT Config Template
@@ -316,11 +320,22 @@ def load_contract(manifest_path: str) -> dict:
         sys.exit(1)
     with open(path, "r") as f:
         data = json.load(f)
-    for key in ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size"):
+    for key in REQUIRED_CONTRACT_KEYS:
         if key not in data:
             print(f"ERROR: Contract missing required key: {key}", file=sys.stderr)
             sys.exit(1)
     return data
+
+
+def log_resolved_contract(contract: dict) -> None:
+    """Print the full resolved contract (must match Unreal startup logs)."""
+    print("[NEAT contract] --- source of truth (from Unreal manifest) ---")
+    print(f"[NEAT contract]   fitness_dir={contract['fitness_dir']}")
+    print(f"[NEAT contract]   genome_dir={contract['genome_dir']}")
+    print(f"[NEAT contract]   checkpoint_dir={contract['checkpoint_dir']}")
+    print(f"[NEAT contract]   best_genome_path={contract['best_genome_path']}")
+    print(f"[NEAT contract]   observation_size={contract['observation_size']} action_size={contract['action_size']}")
+    print("[NEAT contract] --- end contract ---")
 
 
 def create_default_config(config_path: str, obs_size: int, action_size: int):
@@ -337,6 +352,8 @@ def main():
     args = parser.parse_args()
 
     contract = load_contract(args.manifest)
+    log_resolved_contract(contract)
+
     fitness_dir = contract["fitness_dir"]
     genome_dir = contract["genome_dir"]
     checkpoint_dir = contract["checkpoint_dir"]
@@ -344,15 +361,6 @@ def main():
     action_size = int(contract["action_size"])
     genome_dir_path = Path(genome_dir)
     checkpoint_dir_path = Path(checkpoint_dir)
-
-    # Log resolved contract (must match Unreal logs)
-    best_genome_path = contract.get("best_genome_path", "")
-    print("[NEAT contract] Resolved directories from manifest:")
-    print(f"  fitness_dir={fitness_dir}")
-    print(f"  genome_dir={genome_dir}")
-    print(f"  checkpoint_dir={checkpoint_dir}")
-    print(f"  best_genome_path={best_genome_path}")
-    print(f"  observation_size={obs_size} action_size={action_size}")
 
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / CONFIG_FILE

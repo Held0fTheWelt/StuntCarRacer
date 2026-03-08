@@ -11,10 +11,20 @@ class UPythonTrainingExecutor;
 class USimpleNeuralNetwork;
 
 // ============================================================================
-// NEAT Training Contract (Unreal = source of truth; passed to Python via manifest)
+// NEAT Training Contract (Unreal = single source of truth; passed to Python via manifest)
 // ============================================================================
 
-/** Single shared contract for Unreal <-> Python NEAT training. All paths absolute. */
+/**
+ * Canonical contract for Unreal <-> Python NEAT training.
+ * All paths are absolute. Python receives this via neat_contract.json and must use
+ * these values exclusively (no hardcoded fallback paths).
+ *
+ * File naming (both sides must use):
+ *   - Fitness: generation_{N}.json
+ *   - Genomes list: generation_{N}_genomes.json
+ *   - Genome: genome_{id}.json
+ *   - Best genome: best_genome.json
+ */
 struct FNEATTrainingContract
 {
 	FString FitnessDir;
@@ -22,13 +32,21 @@ struct FNEATTrainingContract
 	FString CheckpointDir;
 	FString BestGenomePath;
 	int32 ObservationSize = 15;  // Must match FRacingObservation (base without LIDAR)
-	int32 ActionSize = 3;        // Steer, Throttle, Brake
+	int32 ActionSize = 3;         // Steer, Throttle, Brake
 
-	/** Generation file naming: fitness = generation_{N}.json, genomes list = generation_{N}_genomes.json, genome file = genome_{id}.json */
+	/** File naming: fitness export */
 	static inline const TCHAR* FitnessFileNameFormat = TEXT("generation_%d.json");
+	/** File naming: genomes list for a generation */
 	static inline const TCHAR* GenomesListFileNameFormat = TEXT("generation_%d_genomes.json");
+	/** File naming: single genome file */
 	static inline const TCHAR* GenomeFileNameFormat = TEXT("genome_%d.json");
+	/** File naming: best genome (inference) */
 	static inline const TCHAR* BestGenomeFileName = TEXT("best_genome.json");
+
+	/** Manifest filename written by Unreal, consumed by Python. Stored under Saved/Training/. */
+	static inline const TCHAR* ManifestFileName = TEXT("neat_contract.json");
+	/** Parent dir for manifest and NEAT subdirs (relative to ProjectSavedDir). */
+	static inline const TCHAR* TrainingDirName = TEXT("Training");
 };
 
 /**
@@ -63,15 +81,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	float MaxEpisodeDuration = 120.f;
 
-	/** Export directory for fitness values (relative to project saved dir, e.g. "Training/Fitness") */
+	/** Export directory for fitness values (relative to project saved dir). Canonical: Training/Fitness */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	FString FitnessExportDir = TEXT("Training/Fitness");
 
-	/** Input directory for genomes from Python (relative to project saved dir, e.g. "Training/NEAT") */
+	/** Directory for genomes and checkpoint from Python (relative to project saved dir). Canonical: Training/NEAT */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	FString GenomeInputDir = TEXT("Training/NEAT");
 
-	/** Python script: name relative to Plugins/GameFeatures/CarAI/Content/Python (e.g. "train_neat.py") */
+	/** Python script: filename only (e.g. train_neat.py). Resolved relative to CarAI plugin Content/Python. Do not include Content/Python/ in the path. */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	FString PythonScriptPath = TEXT("train_neat.py");
 
@@ -167,7 +185,7 @@ protected:
 	/** Trigger Python training to evolve next generation */
 	void TriggerPythonEvolution();
 
-	/** Write manifest JSON for Python; returns path or empty on failure */
+	/** Write manifest JSON for Python (Saved/Training/neat_contract.json). Returns path or empty on failure. */
 	FString WriteContractManifest(const FNEATTrainingContract& Contract) const;
 
 	/** Callback when Python evolution is complete */

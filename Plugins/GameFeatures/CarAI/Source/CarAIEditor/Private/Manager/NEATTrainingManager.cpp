@@ -47,14 +47,15 @@ void UNEATTrainingManager::StartTraining()
 	CurrentGeneration = 0;
 	GenomeFitnessMap.Empty();
 
-	// Log resolved contract at startup (single source of truth)
+	// Log resolved contract at startup (canonical; Python receives same via manifest)
 	const FNEATTrainingContract Contract = GetResolvedContract();
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT contract (resolved):"));
-	UE_LOG(LogTemp, Log, TEXT("  FitnessDir=%s"), *Contract.FitnessDir);
-	UE_LOG(LogTemp, Log, TEXT("  GenomeDir=%s"), *Contract.GenomeDir);
-	UE_LOG(LogTemp, Log, TEXT("  CheckpointDir=%s"), *Contract.CheckpointDir);
-	UE_LOG(LogTemp, Log, TEXT("  BestGenomePath=%s"), *Contract.BestGenomePath);
-	UE_LOG(LogTemp, Log, TEXT("  ObservationSize=%d ActionSize=%d"), Contract.ObservationSize, Contract.ActionSize);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] --- NEAT contract (source of truth) ---"));
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   fitness_dir=%s"), *Contract.FitnessDir);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   genome_dir=%s"), *Contract.GenomeDir);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   checkpoint_dir=%s"), *Contract.CheckpointDir);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   best_genome_path=%s"), *Contract.BestGenomePath);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   observation_size=%d action_size=%d"), Contract.ObservationSize, Contract.ActionSize);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] --- end contract ---"));
 
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting NEAT training"));
 	UE_LOG(LogTemp, Log, TEXT("  Generations: %d"), NumGenerations);
@@ -169,6 +170,7 @@ FNEATTrainingContract UNEATTrainingManager::GetResolvedContract() const
 {
 	FNEATTrainingContract C;
 	const FString SavedDir = FPaths::ProjectSavedDir();
+	// Single source of truth: all paths derived from manager config (relative dirs + Saved)
 	C.FitnessDir = FPaths::Combine(SavedDir, FitnessExportDir);
 	C.GenomeDir = FPaths::Combine(SavedDir, GenomeInputDir);
 	C.CheckpointDir = C.GenomeDir;
@@ -180,7 +182,7 @@ FNEATTrainingContract UNEATTrainingManager::GetResolvedContract() const
 
 FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract& Contract) const
 {
-	const FString ManifestDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Training"));
+	const FString ManifestDir = FPaths::Combine(FPaths::ProjectSavedDir(), FNEATTrainingContract::TrainingDirName);
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	if (!PlatformFile.DirectoryExists(*ManifestDir))
 	{
@@ -191,7 +193,7 @@ FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract&
 		}
 	}
 
-	const FString ManifestPath = FPaths::Combine(ManifestDir, TEXT("neat_contract.json"));
+	const FString ManifestPath = FPaths::Combine(ManifestDir, FNEATTrainingContract::ManifestFileName);
 	TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject());
 	Root->SetStringField(TEXT("fitness_dir"), Contract.FitnessDir);
 	Root->SetStringField(TEXT("genome_dir"), Contract.GenomeDir);
