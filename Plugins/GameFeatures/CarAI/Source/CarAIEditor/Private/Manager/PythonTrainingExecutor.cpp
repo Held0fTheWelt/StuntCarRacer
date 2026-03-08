@@ -132,7 +132,7 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 {
 	if (bTrainingInProgress)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PythonTrainingExecutor: Training already in progress"));
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training already in progress"));
 		return;
 	}
 
@@ -165,7 +165,7 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 
 	FString BatchScriptPath = FPaths::Combine(LogDir, FString::Printf(TEXT("run_training_%s.bat"), *Timestamp));
 	FString ScriptDir = FPaths::GetPath(ScriptPath);
-	// Invocation: python <script> --manifest <manifest_path> (Unreal contract; Python must use only these values)
+	// Invocation: python <script> --manifest <manifest_path>
 	FString BatchScriptContent = FString::Printf(
 		TEXT("@echo off\n")
 		TEXT("cd /d \"%s\"\n")
@@ -194,11 +194,9 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 	LastExitCode = -1;
 	LastLogReadPosition = 0;
 
-	// Starte asynchronen Task (erfasse BatchScriptPath für späteres Löschen)
 	FString BatchScriptPathToDelete = BatchScriptPath;
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, CommandLine, BatchScriptPathToDelete]()
 	{
-		// Starte Prozess mit cmd.exe für Shell-Umleitung
 		FString CmdExe = TEXT("cmd.exe");
 		FProcHandle ProcessHandle = FPlatformProcess::CreateProc(
 			*CmdExe,
@@ -216,6 +214,7 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 
 		if (!ProcessHandle.IsValid())
 		{
+			UE_LOG(LogTemp, Error, TEXT("[PythonTrainingExecutor] Failed to start cmd.exe process for Python training"));
 			AsyncTask(ENamedThreads::GameThread, [this]()
 			{
 				bTrainingInProgress = false;
@@ -225,6 +224,14 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 			return;
 		}
 
+		// Store handle in member so StopTraining() on the game thread can terminate this process.
+		{
+			FScopeLock Lock(&ProcessHandleLock);
+			TrainingProcessHandle = ProcessHandle;
+		}
+		UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Process started; handle stored (StopTraining will terminate this process if called)"));
+
+		// Poll until process exits, streaming log output to Unreal log
 		while (FPlatformProcess::IsProcRunning(ProcessHandle))
 		{
 			ReadPythonLogToUnrealLog();
@@ -240,27 +247,34 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 		int32 ExitCode = 0;
 		FPlatformProcess::GetProcReturnCode(ProcessHandle, &ExitCode);
 		FPlatformProcess::CloseProc(ProcessHandle);
-		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-		if (PlatformFile.FileExists(*BatchScriptPathToDelete))
+
+		// Clear member handle now that the process has exited
 		{
-			PlatformFile.DeleteFile(*BatchScriptPathToDelete);
+			FScopeLock Lock(&ProcessHandleLock);
+			TrainingProcessHandle.Reset();
 		}
+
+		IPlatformFile& LocalPlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+		if (LocalPlatformFile.FileExists(*BatchScriptPathToDelete))
+		{
+			LocalPlatformFile.DeleteFile(*BatchScriptPathToDelete);
+		}
+
 		AsyncTask(ENamedThreads::GameThread, [this, ExitCode]()
 		{
 			bTrainingInProgress = false;
 			LastExitCode = ExitCode;
 			bool bSuccess = (ExitCode == 0);
-			
+
 			if (bSuccess)
 			{
-				UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Training completed successfully (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Process exited successfully (exit code=%d)"), ExitCode);
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Training failed (Exit Code: %d)"), ExitCode);
+				UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Process exited with failure (exit code=%d); see log: %s"), ExitCode, *PythonLogFilePath);
 			}
-			UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] Full output: %s"), *PythonLogFilePath);
-			
+
 			OnTrainingCompleted.Broadcast(bSuccess);
 		});
 	});
@@ -275,13 +289,13 @@ bool UPythonTrainingExecutor::WaitForTraining(float TimeoutSeconds)
 {
 	if (!bTrainingInProgress)
 	{
-		return true; // Nicht gestartet oder bereits fertig
+		return true; // Not started or already finished
 	}
 
 	const double StartTime = FPlatformTime::Seconds();
 	while (bTrainingInProgress && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
 	{
-		FPlatformProcess::Sleep(0.1f); // Warte 100ms
+		FPlatformProcess::Sleep(0.1f); // Wait 100ms
 	}
 
 	return !bTrainingInProgress;
@@ -289,16 +303,25 @@ bool UPythonTrainingExecutor::WaitForTraining(float TimeoutSeconds)
 
 void UPythonTrainingExecutor::StopTraining()
 {
-	if (!bTrainingInProgress || !TrainingProcessHandle.IsValid())
+	FScopeLock Lock(&ProcessHandleLock);
+	if (!bTrainingInProgress)
 	{
+		UE_LOG(LogTemp, Log, TEXT("[PythonTrainingExecutor] StopTraining: no training in progress"));
 		return;
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Stopping training..."));
+	if (!TrainingProcessHandle.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] StopTraining: training flagged in-progress but process handle is invalid (process may not have started yet)"));
+		bTrainingInProgress = false;
+		return;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Stop requested: terminating active Python process"));
 	FPlatformProcess::TerminateProc(TrainingProcessHandle, true);
 	FPlatformProcess::CloseProc(TrainingProcessHandle);
 	TrainingProcessHandle.Reset();
 	bTrainingInProgress = false;
 	LastExitCode = -1;
+	UE_LOG(LogTemp, Warning, TEXT("[PythonTrainingExecutor] Process terminated and handle closed"));
 }
 
 void UPythonTrainingExecutor::ReadPythonLogToUnrealLog()
@@ -343,7 +366,7 @@ void UPythonTrainingExecutor::ReadPythonLogToUnrealLog()
 	{
 		if (!Line.IsEmpty())
 		{
-			FString LineToLog = Line; // Kopie für Lambda
+			FString LineToLog = Line; // Copy for lambda capture
 			AsyncTask(ENamedThreads::GameThread, [LineToLog]()
 			{
 				UE_LOG(LogTemp, Log, TEXT("[Python] %s"), *LineToLog);

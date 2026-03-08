@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/CriticalSection.h"
 #include "PythonTrainingExecutor.generated.h"
 
 /**
@@ -69,6 +70,9 @@ private:
 	bool bTrainingInProgress = false;
 	FString PythonLogFilePath;
 	int64 LastLogReadPosition = 0;
+
+	/** Guards TrainingProcessHandle for cross-thread access (background task writes, game thread reads in StopTraining). */
+	FCriticalSection ProcessHandleLock;
 
 	/** Resolves script to absolute path. Input: filename only (e.g. train_neat.py); strips any Content/Python prefix. Result: Plugin Content/Python + filename. */
 	FString FindPythonScript(const FString& ScriptName) const;
