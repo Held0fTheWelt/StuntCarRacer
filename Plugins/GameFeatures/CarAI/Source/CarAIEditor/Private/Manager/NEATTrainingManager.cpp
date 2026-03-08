@@ -429,6 +429,31 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 {
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting episode evaluation (Gen %d)"), CurrentGeneration);
 
+	// Hard gate: no evaluation episode may start with GenomeID < 0 or missing backend.
+	int32 BadCount = 0;
+	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
+	{
+		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
+		if (Agent)
+		{
+			if (Agent->GenomeID < 0)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] GUARD: Active batch agent %d has GenomeID < 0; cannot start evaluation. Assign genomes first."), i);
+				BadCount++;
+			}
+			else if (!Agent->HasNEATPolicyBackend())
+			{
+				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] GUARD: Active batch agent %d (genome_id=%d) has no policy backend; cannot start evaluation."), i, Agent->GenomeID);
+				BadCount++;
+			}
+		}
+	}
+	if (BadCount > 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Aborting StartEpisodeEvaluation: %d active batch agent(s) failed readiness (GenomeID or backend missing)."), BadCount);
+		return;
+	}
+
 	// Activate agents only when genomes are assigned and we are about to run episodes (no stepping before this).
 	int32 ActivatedCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
@@ -442,7 +467,7 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 	}
 	if (ActivatedCount > 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Evaluation started for %d agent(s) (genomes assigned; stepping begins)."), ActivatedCount);
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Evaluation activated for %d agent(s) (genomes assigned; stepping begins)."), ActivatedCount);
 	}
 
 	// Reset only active batch agents (agents outside active batch are already force-ended in AssignGenomesToAgents)
@@ -785,7 +810,7 @@ void UNEATTrainingManager::TriggerPythonEvolution()
 	TrainingState = ENEATTrainingState::WaitingForPython;
 	bWaitingForPython = true;
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Triggering Python evolution (manifest=%s)"), *ManifestPath);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python/evolution triggered (generation %d, manifest=%s)"), CurrentGeneration, *ManifestPath);
 
 	PythonExecutor->ExecuteTrainingAsync(PythonScriptPath, PythonExecutable, ManifestPath);
 }
