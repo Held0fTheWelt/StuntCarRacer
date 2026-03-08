@@ -98,6 +98,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	FString PythonExecutable = TEXT("python");
 
+	/**
+	 * If true, start a fresh NEAT run: Python deletes its checkpoint and best genome before starting.
+	 * If false (default), resume from the latest checkpoint if one exists.
+	 * The chosen mode is written into the manifest (training_mode = "fresh" | "resume")
+	 * so Python can act on it deterministically. Set this explicitly; do not rely on implicit behavior.
+	 */
+	UPROPERTY(EditAnywhere, Category = "NEAT Config")
+	bool bFreshStart = false;
+
 	/** Observation size (must match FRacingObservation base size; used in NEAT config) */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "1"))
 	int32 ObservationSize = 15;
@@ -198,6 +207,14 @@ protected:
 
 	/** Load best genome for inference */
 	bool LoadBestGenome();
+
+	/**
+	 * Finalize best-genome artifact from the last evaluated generation's fitness file,
+	 * then load it for inference. Must be called after ExportFitnessValues() and CurrentGeneration++.
+	 * Reads generation_{CurrentGeneration-1}.json, finds best genome_id by fitness,
+	 * copies genome_{best_id}.json to BestGenomePath, then calls LoadBestGenome().
+	 */
+	bool FinalizeAndLoadBestGenome();
 
 	/** Tick function for evaluating episodes */
 	void TickEvaluation(float DeltaTime);

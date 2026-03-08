@@ -62,6 +62,7 @@ void UNEATTrainingManager::StartTraining()
 	UE_LOG(LogTemp, Log, TEXT("  Generations: %d"), NumGenerations);
 	UE_LOG(LogTemp, Log, TEXT("  Population: %d"), PopulationSize);
 	UE_LOG(LogTemp, Log, TEXT("  Agents: %d"), Agents.Num());
+	UE_LOG(LogTemp, Log, TEXT("  TrainingMode: %s"), bFreshStart ? TEXT("FRESH (checkpoint + best-genome will be discarded by Python)") : TEXT("RESUME (checkpoint will be loaded if available)"));
 
 	// Start first generation
 	TrainingState = ENEATTrainingState::Evaluating;
@@ -207,6 +208,9 @@ FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract&
 	Root->SetStringField(TEXT("best_genome_path"), Contract.BestGenomePath);
 	Root->SetNumberField(TEXT("observation_size"), Contract.ObservationSize);
 	Root->SetNumberField(TEXT("action_size"), Contract.ActionSize);
+	// training_mode: "fresh" forces Python to discard checkpoint/best-genome before running;
+	// "resume" loads the latest checkpoint (default). Set bFreshStart on this manager to control.
+	Root->SetStringField(TEXT("training_mode"), bFreshStart ? TEXT("fresh") : TEXT("resume"));
 
 	FString JsonString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
@@ -489,10 +493,10 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); loading best genome for inference"), NumGenerations);
-				if (!LoadBestGenome())
+				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
+				if (!FinalizeAndLoadBestGenome())
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Best genome could not be loaded after training (path=%s); agents retain last batch genome"), *GetResolvedContract().BestGenomePath);
+					UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
 				}
 				OnTrainingComplete.Broadcast();
 			}
@@ -548,10 +552,10 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); loading best genome for inference"), NumGenerations);
-				if (!LoadBestGenome())
+				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
+				if (!FinalizeAndLoadBestGenome())
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Best genome could not be loaded after training (path=%s); agents retain last batch genome"), *GetResolvedContract().BestGenomePath);
+					UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
 				}
 				OnTrainingComplete.Broadcast();
 			}
@@ -882,4 +886,94 @@ bool UNEATTrainingManager::LoadBestGenome()
 	LogNEATStatusSummary(TEXT("LoadBestGenome"));
 	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] LoadBestGenome complete: assigned to %d agent(s)"), AssignedCount);
 	return true;
+}
+
+bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
+{
+	// CurrentGeneration has already been incremented by the time this is called;
+	// the last evaluated generation is CurrentGeneration - 1.
+	const int32 LastEvaluatedGen = CurrentGeneration - 1;
+	const FNEATTrainingContract Contract = GetResolvedContract();
+
+	// Read the fitness file that ExportFitnessValues() just wrote for this generation
+	const FString FitnessFilePath = FPaths::Combine(Contract.FitnessDir,
+		FString::Printf(TEXT("generation_%d.json"), LastEvaluatedGen));
+
+	if (!FPaths::FileExists(FitnessFilePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: fitness file not found for generation %d: %s"),
+			LastEvaluatedGen, *FitnessFilePath);
+		return false;
+	}
+
+	FString JsonString;
+	if (!FFileHelper::LoadFileToString(JsonString, *FitnessFilePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to read fitness file: %s"), *FitnessFilePath);
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> JsonObject;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to parse fitness JSON: %s"), *FitnessFilePath);
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* GenomesArray;
+	if (!JsonObject->TryGetArrayField(TEXT("genomes"), GenomesArray) || GenomesArray->Num() == 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: no genomes in fitness file: %s"), *FitnessFilePath);
+		return false;
+	}
+
+	int32 BestGenomeID = -1;
+	float BestFitness = -FLT_MAX;
+	for (const TSharedPtr<FJsonValue>& Val : *GenomesArray)
+	{
+		const TSharedPtr<FJsonObject>* Obj;
+		if (!Val->TryGetObject(Obj)) continue;
+		const int32 GID = (*Obj)->GetIntegerField(TEXT("genome_id"));
+		const float Fit = static_cast<float>((*Obj)->GetNumberField(TEXT("fitness")));
+		if (Fit > BestFitness)
+		{
+			BestFitness = Fit;
+			BestGenomeID = GID;
+		}
+	}
+
+	if (BestGenomeID < 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: could not determine best genome_id from %s"), *FitnessFilePath);
+		return false;
+	}
+
+	const FString SourcePath = FPaths::Combine(Contract.GenomeDir,
+		FString::Printf(TEXT("genome_%d.json"), BestGenomeID));
+	if (!FPaths::FileExists(SourcePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: genome file not found: %s (genome_id=%d generation=%d)"),
+			*SourcePath, BestGenomeID, LastEvaluatedGen);
+		return false;
+	}
+
+	// Copy genome file to the canonical best_genome_path from the contract
+	const FString& DestPath = Contract.BestGenomePath;
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	const FString DestDir = FPaths::GetPath(DestPath);
+	if (!PlatformFile.DirectoryExists(*DestDir))
+	{
+		PlatformFile.CreateDirectoryTree(*DestDir);
+	}
+	if (!PlatformFile.CopyFile(*DestPath, *SourcePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to copy %s -> %s"), *SourcePath, *DestPath);
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome artifact finalized: generation=%d genome_id=%d fitness=%.2f -> %s"),
+		LastEvaluatedGen, BestGenomeID, BestFitness, *DestPath);
+
+	return LoadBestGenome();
 }
