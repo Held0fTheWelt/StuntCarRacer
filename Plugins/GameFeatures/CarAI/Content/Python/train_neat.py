@@ -38,6 +38,15 @@ from typing import Dict, List, Tuple, Optional
 CONFIG_FILE = "neat_config.txt"
 REQUIRED_CONTRACT_KEYS = ("fitness_dir", "genome_dir", "checkpoint_dir", "best_genome_path", "observation_size", "action_size")
 
+# Canonical NEAT observation size and layout (must match Unreal FRacingObservation::NEAT_OBSERVATION_SIZE and BuildVectorForNEAT order).
+# LIDAR and other optional sensors are not part of the NEAT contract.
+NEAT_OBSERVATION_SIZE = 15
+NEAT_OBSERVATION_LAYOUT = (
+    "SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,"
+    "RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,"
+    "GravityX,GravityY,GravityZ"
+)
+
 # ============================================================================
 # NEAT Config Template
 # ============================================================================
@@ -349,17 +358,26 @@ def load_contract(manifest_path: str) -> dict:
         if key not in data:
             print(f"ERROR: Contract missing required key: {key}", file=sys.stderr)
             sys.exit(1)
+    obs = int(data["observation_size"])
+    if obs != NEAT_OBSERVATION_SIZE:
+        print(
+            f"ERROR: Observation size mismatch: contract observation_size={obs}, NEAT path requires {NEAT_OBSERVATION_SIZE}. "
+            "Unreal and Python must agree; optional sensors (e.g. LIDAR) are not supported in the NEAT contract.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     return data
 
 
 def log_resolved_contract(contract: dict) -> None:
-    """Print the full resolved contract (must match Unreal startup logs)."""
+    """Print the full resolved contract and NEAT observation schema (must match Unreal)."""
     print("[NEAT contract] --- source of truth (from Unreal manifest) ---")
     print(f"[NEAT contract]   fitness_dir={contract['fitness_dir']}")
     print(f"[NEAT contract]   genome_dir={contract['genome_dir']}")
     print(f"[NEAT contract]   checkpoint_dir={contract['checkpoint_dir']}")
     print(f"[NEAT contract]   best_genome_path={contract['best_genome_path']}")
     print(f"[NEAT contract]   observation_size={contract['observation_size']} action_size={contract['action_size']}")
+    print(f"[NEAT contract] NEAT observation schema: size={NEAT_OBSERVATION_SIZE} layout={NEAT_OBSERVATION_LAYOUT} (LIDAR not used)")
     print("[NEAT contract] --- end contract ---")
 
 
@@ -432,9 +450,16 @@ def main():
         print(f"ERROR: Missing fitness export for generation {last_exported}. Expected: {fitness_file}", file=sys.stderr)
         print("[NEAT] Cannot resume without fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
         sys.exit(1)
+    print(f"[NEAT] Fitness loaded: generation={last_exported}, {len(fitness_map)} genomes")
 
     for genome_id, genome in population.population.items():
         genome.fitness = fitness_map.get(genome_id, 0.0)
+
+    # Capture best genome from pre-reproduction population (before population.run() modifies it)
+    best_id = max(population.population.keys(), key=lambda gid: population.population[gid].fitness)
+    best_genome_obj = population.population[best_id]
+    best_fitness = best_genome_obj.fitness
+    print(f"[NEAT] Best genome from evaluated generation {last_exported}: genome_id={best_id} fitness={best_fitness:.2f}")
 
     def eval_only_assign(genomes, cfg):
         for gid, g in genomes:
@@ -443,16 +468,18 @@ def main():
     population.run(eval_only_assign, 1)
     next_gen = last_exported + 1
 
-    best_id = max(population.population.keys(), key=lambda gid: population.population[gid].fitness)
-    best_fitness = population.population[best_id].fitness
-    print(f"[NEAT] Best genome summary: genome_id={best_id} fitness={best_fitness:.2f}")
-
     export_population_for_unreal(population, config, genome_dir_path, next_gen)
     list_path = genome_dir_path / f"generation_{next_gen}_genomes.json"
     print(f"[NEAT] Exported generation file: {list_path} (generation {next_gen} for Unreal to evaluate)")
     print(f"[NEAT] Number of genomes exported: {len(population.population)}")
     save_checkpoint(checkpoint_path, population, config, next_gen)
     print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation={next_gen})")
+
+    # Export pre-reproduction best genome to best_genome_path from contract
+    best_genome_path = contract["best_genome_path"]
+    Path(best_genome_path).parent.mkdir(parents=True, exist_ok=True)
+    GenomeExporter.export_genome(best_genome_obj, best_id, last_exported, best_fitness, str(best_genome_path), config)
+    print(f"[NEAT] Best genome exported: path={best_genome_path} genome_id={best_id} fitness={best_fitness:.2f}")
 
 
 if __name__ == "__main__":
