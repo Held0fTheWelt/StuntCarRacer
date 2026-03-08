@@ -50,8 +50,8 @@ public:
 
 	virtual bool Evaluate(const TArray<float>& Observation, TArray<float>& OutActions) override;
 	virtual bool IsValid() const override { return bCompiled; }
+	virtual int32 GetExpectedInputCount() const override { return ExpectedInputCount; }
 
-	int32 GetExpectedInputCount() const { return ExpectedInputCount; }
 	int32 GetExpectedOutputCount() const { return ExpectedOutputCount; }
 
 	/** Create and compile an evaluator from a genome. Returns nullptr on failure. */

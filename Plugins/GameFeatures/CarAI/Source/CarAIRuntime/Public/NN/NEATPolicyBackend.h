@@ -26,4 +26,8 @@ public:
 	/** Whether this backend is ready to evaluate (compiled graph, valid network, etc.). */
 	UFUNCTION(BlueprintCallable, Category = "Policy")
 	virtual bool IsValid() const { return false; }
+
+	/** Expected observation vector length for this backend. Return -1 if unspecified (no pre-check). NEAT returns 15. */
+	UFUNCTION(BlueprintCallable, Category = "Policy")
+	virtual int32 GetExpectedInputCount() const { return -1; }
 };
