@@ -4,6 +4,8 @@
 #include "NN/NEATGraphEvaluator.h"
 #include "Import/NEATGenomeImporter.h"
 #include "NN/NEATGenomeTypes.h"
+#include "CarAIRuntimeLogging.h"
+#include "Logging.h"
 
 #include "Engine/World.h"
 #include "TimerManager.h"
@@ -23,13 +25,13 @@ void UNEATTrainingManager::StartTraining()
 {
 	if (TrainingState != ENEATTrainingState::Idle)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Training already running!"));
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Training already running!"));
 		return;
 	}
 
 	if (Agents.Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] No agents registered!"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] No agents registered!"));
 		return;
 	}
 
@@ -48,21 +50,21 @@ void UNEATTrainingManager::StartTraining()
 
 	// Log resolved contract at startup (canonical; Python receives same via manifest)
 	const FNEATTrainingContract Contract = GetResolvedContract();
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] --- NEAT contract (source of truth) ---"));
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   fitness_dir=%s"), *Contract.FitnessDir);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   genome_dir=%s"), *Contract.GenomeDir);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   checkpoint_dir=%s"), *Contract.CheckpointDir);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   best_genome_path=%s"), *Contract.BestGenomePath);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager]   observation_size=%d action_size=%d"), Contract.ObservationSize, Contract.ActionSize);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] --- NEAT contract (source of truth) ---"));
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager]   fitness_dir=%s"), *Contract.FitnessDir);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager]   genome_dir=%s"), *Contract.GenomeDir);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager]   checkpoint_dir=%s"), *Contract.CheckpointDir);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager]   best_genome_path=%s"), *Contract.BestGenomePath);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager]   observation_size=%d action_size=%d"), Contract.ObservationSize, Contract.ActionSize);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] NEAT observation schema: size=%d layout=SpeedNorm,YawRateNorm,PitchRateNorm,RollRateNorm,RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,GravityX,GravityY,GravityZ (LIDAR not used)"),
 		FRacingObservation::NEAT_OBSERVATION_SIZE);
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] --- end contract ---"));
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] --- end contract ---"));
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting NEAT training"));
-	UE_LOG(LogTemp, Log, TEXT("  Generations: %d"), NumGenerations);
-	UE_LOG(LogTemp, Log, TEXT("  Population: %d"), PopulationSize);
-	UE_LOG(LogTemp, Log, TEXT("  Agents: %d"), Agents.Num());
-	UE_LOG(LogTemp, Log, TEXT("  TrainingMode: %s"), bFreshStart ? TEXT("FRESH (checkpoint + best-genome will be discarded by Python)") : TEXT("RESUME (checkpoint will be loaded if available)"));
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Starting NEAT training"));
+	UE_LOG(LogCarAITraining, Display, TEXT("  Generations: %d"), NumGenerations);
+	UE_LOG(LogCarAITraining, Display, TEXT("  Population: %d"), PopulationSize);
+	UE_LOG(LogCarAITraining, Display, TEXT("  Agents: %d"), Agents.Num());
+	UE_LOG(LogCarAITraining, Display, TEXT("  TrainingMode: %s"), bFreshStart ? TEXT("FRESH (checkpoint + best-genome will be discarded by Python)") : TEXT("RESUME (checkpoint will be loaded if available)"));
 
 	// Start first generation
 	TrainingState = ENEATTrainingState::Evaluating;
@@ -80,7 +82,7 @@ void UNEATTrainingManager::StopTraining()
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Stopping training..."));
+	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Stopping training..."));
 
 	// Stop evaluation timer
 	if (GetWorld())
@@ -94,6 +96,16 @@ void UNEATTrainingManager::StopTraining()
 		PythonExecutor->StopTraining();
 	}
 
+	// Revoke evaluation authorization on all agents so they stop stepping immediately.
+	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
+	{
+		if (URacingAgentComponent* Agent = WeakAgent.Get())
+		{
+			Agent->RevokeEvaluationAuthorization();
+		}
+	}
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] StopTraining: evaluation authorization revoked on all %d agent(s)."), Agents.Num());
+
 	TrainingState = ENEATTrainingState::Idle;
 	bWaitingForPython = false;
 
@@ -105,7 +117,7 @@ void UNEATTrainingManager::PauseTraining()
 	if (TrainingState == ENEATTrainingState::Evaluating)
 	{
 		TrainingState = ENEATTrainingState::Idle;
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training paused"));
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Training paused"));
 	}
 }
 
@@ -114,7 +126,7 @@ void UNEATTrainingManager::ResumeTraining()
 	if (TrainingState == ENEATTrainingState::Idle)
 	{
 		TrainingState = ENEATTrainingState::Evaluating;
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training resumed"));
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Training resumed"));
 	}
 }
 
@@ -122,22 +134,42 @@ void UNEATTrainingManager::ResumeTraining()
 // Agent Management
 // ============================================================================
 
-void UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
+bool UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
 {
+	// Passive registration: keep reference, bind delegate, do not Initialize or GrantEvaluationAuthorization.
 	if (!Agent)
 	{
-		return;
+		return false;
+	}
+	if (IsAgentRegistered(Agent))
+	{
+		UE_LOG(LogCarAITraining, Verbose, TEXT("[NEATTrainingManager] Agent already registered; skipping duplicate."));
+		return false;
 	}
 
 	Agents.Add(Agent);
 	Agent->OnEpisodeDone.AddDynamic(this, &UNEATTrainingManager::OnAgentEpisodeDone);
+
 	// Ensure registered agents are unassigned (no genome/backend) until AssignGenomesToAgents runs.
 	Agent->GenomeID = -1;
 	Agent->SetPolicyBackend(nullptr);
 
-	// Registration is passive: store agent, bind events, do NOT activate or start stepping.
-	// Evaluation starts only when genomes are loaded and StartEpisodeEvaluation() runs.
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Registered agent (idle; evaluation will start when genomes are loaded and assigned). Total: %d"), Agents.Num());
+	// Advance runtime state: Idle -> Registered. Does NOT grant evaluation authorization.
+	// Evaluation starts only when genomes are loaded and GrantEvaluationAuthorization() is called.
+	Agent->MarkRegistered();
+
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Agent registered (RuntimeState=Registered; awaiting genome assignment and authorization). Total registered: %d"), Agents.Num());
+	return true;
+}
+
+bool UNEATTrainingManager::IsAgentRegistered(URacingAgentComponent* Agent) const
+{
+	if (!Agent) return false;
+	for (const TWeakObjectPtr<URacingAgentComponent>& Weak : Agents)
+	{
+		if (Weak.Get() == Agent) return true;
+	}
+	return false;
 }
 
 void UNEATTrainingManager::UnregisterAgent(URacingAgentComponent* Agent)
@@ -148,7 +180,9 @@ void UNEATTrainingManager::UnregisterAgent(URacingAgentComponent* Agent)
 	}
 
 	Agent->OnEpisodeDone.RemoveDynamic(this, &UNEATTrainingManager::OnAgentEpisodeDone);
+	Agent->ResetToIdle();
 	Agents.Remove(Agent);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Agent unregistered and reset to Idle."));
 }
 
 void UNEATTrainingManager::UnregisterAllAgents()
@@ -158,11 +192,12 @@ void UNEATTrainingManager::UnregisterAllAgents()
 		if (URacingAgentComponent* Agent = WeakAgent.Get())
 		{
 			Agent->OnEpisodeDone.RemoveDynamic(this, &UNEATTrainingManager::OnAgentEpisodeDone);
+			Agent->ResetToIdle();
 		}
 	}
 
 	Agents.Empty();
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] All agents unregistered"));
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] All agents unregistered and reset to Idle."));
 }
 
 // ============================================================================
@@ -181,7 +216,7 @@ FNEATTrainingContract UNEATTrainingManager::GetResolvedContract() const
 	C.ObservationSize = FRacingObservation::NEAT_OBSERVATION_SIZE;
 	if (ObservationSize != FRacingObservation::NEAT_OBSERVATION_SIZE)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] ObservationSize %d ignored; NEAT contract uses canonical size %d (FRacingObservation::NEAT_OBSERVATION_SIZE)."),
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] ObservationSize %d ignored; NEAT contract uses canonical size %d (FRacingObservation::NEAT_OBSERVATION_SIZE)."),
 			ObservationSize, FRacingObservation::NEAT_OBSERVATION_SIZE);
 	}
 	C.ActionSize = ActionSize;
@@ -196,7 +231,7 @@ FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract&
 	{
 		if (!PlatformFile.CreateDirectoryTree(*ManifestDir))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to create manifest dir: %s"), *ManifestDir);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to create manifest dir: %s"), *ManifestDir);
 			return FString();
 		}
 	}
@@ -217,15 +252,15 @@ FString UNEATTrainingManager::WriteContractManifest(const FNEATTrainingContract&
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
 	if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to serialize contract manifest"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to serialize contract manifest"));
 		return FString();
 	}
 	if (!FFileHelper::SaveStringToFile(JsonString, *ManifestPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to write manifest: %s"), *ManifestPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to write manifest: %s"), *ManifestPath);
 		return FString();
 	}
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Wrote contract manifest: %s"), *ManifestPath);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Wrote contract manifest: %s"), *ManifestPath);
 	return ManifestPath;
 }
 
@@ -241,14 +276,14 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 
 	if (!FPaths::FileExists(GenomeListPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Genome list not found: %s"), *GenomeListPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Genome list not found: %s"), *GenomeListPath);
 		return false;
 	}
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *GenomeListPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to read genome list: %s"), *GenomeListPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to read genome list: %s"), *GenomeListPath);
 		return false;
 	}
 
@@ -257,14 +292,14 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 
 	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to parse genome list JSON"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to parse genome list JSON"));
 		return false;
 	}
 
 	const TArray<TSharedPtr<FJsonValue>>* GenomesArray;
 	if (!JsonObject->TryGetArrayField(TEXT("genomes"), GenomesArray))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] No genomes field in JSON"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] No genomes field in JSON"));
 		return false;
 	}
 
@@ -283,7 +318,7 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 			FString::Printf(TEXT("genome_%d.json"), GenomeID));
 		if (!FPaths::FileExists(GenomePath))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Missing genome file: %s (genome_id=%d)"), *GenomePath, GenomeID);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Missing genome file: %s (genome_id=%d)"), *GenomePath, GenomeID);
 			return false;
 		}
 	}
@@ -298,40 +333,40 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 		FNEATGenome LoadedGenome;
 		if (!UNEATGenomeImporter::LoadFromFile(GenomePath, LoadedGenome))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: LoadFromFile or parse failed: %s (genome_id=%d). Check unsupported activation / invalid JSON."), *GenomePath, GenomeID);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: LoadFromFile or parse failed: %s (genome_id=%d). Check unsupported activation / invalid JSON."), *GenomePath, GenomeID);
 			return false;
 		}
 		if (!LoadedGenome.bIsValid)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Genome invalid (structure/activation): %s (genome_id=%d)"), *GenomePath, GenomeID);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Genome invalid (structure/activation): %s (genome_id=%d)"), *GenomePath, GenomeID);
 			return false;
 		}
 		// Observation/action size must match contract (no silent mismatch)
 		if (LoadedGenome.NumInputs != Contract.ObservationSize)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Observation size mismatch for genome_id=%d: genome has num_inputs=%d, contract ObservationSize=%d"),
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Observation size mismatch for genome_id=%d: genome has num_inputs=%d, contract ObservationSize=%d"),
 				GenomeID, LoadedGenome.NumInputs, Contract.ObservationSize);
 			return false;
 		}
 		if (LoadedGenome.NumOutputs != Contract.ActionSize)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Action size mismatch for genome_id=%d: genome has num_outputs=%d, contract ActionSize=%d"),
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Action size mismatch for genome_id=%d: genome has num_outputs=%d, contract ActionSize=%d"),
 				GenomeID, LoadedGenome.NumOutputs, Contract.ActionSize);
 			return false;
 		}
 		CurrentGenomes.Add(LoadedGenome);
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome loaded: %s (genome_id=%d, inputs=%d outputs=%d)"), *GenomePath, GenomeID, LoadedGenome.NumInputs, LoadedGenome.NumOutputs);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Genome loaded: %s (genome_id=%d, inputs=%d outputs=%d)"), *GenomePath, GenomeID, LoadedGenome.NumInputs, LoadedGenome.NumOutputs);
 	}
 
 	const int32 LoadedCount = CurrentGenomes.Num();
 	if (LoadedCount != PopulationSize)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d: loaded genome count %d does not match PopulationSize %d. Every genome must be evaluated; aborting to avoid invalid evolution."),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Generation %d: loaded genome count %d does not match PopulationSize %d. Every genome must be evaluated; aborting to avoid invalid evolution."),
 			CurrentGeneration, LoadedCount, PopulationSize);
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated, count matches PopulationSize); ready for batch evaluation"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated, count matches PopulationSize); ready for batch evaluation"),
 		LoadedCount, CurrentGeneration);
 
 	LogNEATStatusSummary(TEXT("LoadGenomes"));
@@ -344,12 +379,12 @@ bool UNEATTrainingManager::LoadGenomeFromJSON(const FString& FilePath, FNEATGeno
 	FNEATGenome LoadedGenome;
 	if (!UNEATGenomeImporter::LoadFromFile(FilePath, LoadedGenome))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadFromFile failed for: %s"), *FilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] LoadFromFile failed for: %s"), *FilePath);
 		return false;
 	}
 	if (!LoadedGenome.bIsValid)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Genome validation failed for: %s"), *FilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Genome validation failed for: %s"), *FilePath);
 		return false;
 	}
 	NEATGenomeToGenomeData(LoadedGenome, OutGenome);
@@ -364,7 +399,7 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 
 	if (NumAgentsInCurrentBatch <= 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] AssignGenomesToAgents: no agents to assign (batch_start=%d, genomes=%d, agents=%d)"),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] AssignGenomesToAgents: no agents to assign (batch_start=%d, genomes=%d, agents=%d)"),
 			CurrentBatchStartIndex, NumGenomes, NumAgents);
 		return;
 	}
@@ -372,17 +407,22 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 	const int32 BatchEnd = CurrentBatchStartIndex + NumAgentsInCurrentBatch;
 	const int32 TotalBatches = (NumGenomes + NumAgents - 1) / NumAgents;
 	const int32 CurrentBatchIndex = (NumGenomes <= NumAgents) ? 0 : (CurrentBatchStartIndex / NumAgents);
+
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Registered agents=%d. Active batch: agent indices [0..%d], size=%d (genomes [%d..%d))."),
+		NumAgents, NumAgentsInCurrentBatch - 1, NumAgentsInCurrentBatch, CurrentBatchStartIndex, BatchEnd);
 	LogGenerationEvaluationProgress(TEXT("batch_start"));
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch %d/%d: evaluating genomes [%d..%d) of %d"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch %d/%d: evaluating genomes [%d..%d) of %d"),
 		CurrentBatchIndex + 1, TotalBatches, CurrentBatchStartIndex, BatchEnd, NumGenomes);
 
 	int32 AssignedCount = 0;
+	int32 AssignmentFailCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 	{
 		URacingAgentComponent* Agent = Agents[i].Get();
 		if (!Agent)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] AssignGenomesToAgents: agent %d is null"), i);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] AssignGenomesToAgents: agent %d is null"), i);
+			AssignmentFailCount++;
 			continue;
 		}
 
@@ -395,19 +435,30 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 		if (Evaluator)
 		{
 			Agent->SetPolicyBackend(Evaluator);
+			// Grant evaluation authorization only after genome AND backend are successfully assigned.
+			Agent->GrantEvaluationAuthorization();
 			AssignedCount++;
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome assigned: NEAT runtime backend set on agent (agent_index=%d, genome_id=%d, genome_index=%d)"), i, Genome.GenomeID, GenomeIndex);
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Genome assigned and authorization granted: agent_index=%d genome_id=%d genome_index=%d RuntimeState=%d"),
+				i, Genome.GenomeID, GenomeIndex, (int32)Agent->GetRuntimeState());
 		}
 		else
 		{
 			Agent->SetPolicyBackend(nullptr);
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Assignment failure: could not build NEAT evaluator for genome_id=%d (genome_index=%d); cleared policy backend for agent"), Genome.GenomeID, GenomeIndex);
+			AssignmentFailCount++;
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Assignment failure: could not build NEAT evaluator for genome_id=%d (genome_index=%d); authorization NOT granted for agent %d."),
+				Genome.GenomeID, GenomeIndex, i);
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] AssignGenomesToAgents: %d agents assigned genomes for this batch (genomes %d..%d)"), AssignedCount, CurrentBatchStartIndex, BatchEnd - 1);
+	if (AssignmentFailCount > 0)
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] AssignGenomesToAgents: %d agent(s) failed assignment in this batch. These agents will not step (no authorization)."), AssignmentFailCount);
+	}
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] AssignGenomesToAgents complete: %d/%d agents authorized (genomes %d..%d)"),
+		AssignedCount, NumAgentsInCurrentBatch, CurrentBatchStartIndex, BatchEnd - 1);
 
-	// Deactivate agents outside the active batch so they cannot fire episode-done events
+	// Deactivate agents outside the active batch so they cannot fire episode-done events.
+	// Revoke authorization on inactive agents (ForceEpisodeDone already does this via state transition).
 	const int32 TotalAgents = Agents.Num();
 	int32 DeactivatedCount = 0;
 	for (int32 i = NumAgentsInCurrentBatch; i < TotalAgents; ++i)
@@ -421,15 +472,16 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 	}
 	if (DeactivatedCount > 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch isolation: %d inactive agents deactivated (force-ended)"), DeactivatedCount);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch isolation: %d inactive agents deactivated (authorization revoked)."), DeactivatedCount);
 	}
 }
 
 void UNEATTrainingManager::StartEpisodeEvaluation()
 {
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Starting episode evaluation (Gen %d)"), CurrentGeneration);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: Gen=%d BatchStart=%d BatchSize=%d"),
+		CurrentGeneration, CurrentBatchStartIndex, NumAgentsInCurrentBatch);
 
-	// Hard gate: no evaluation episode may start with GenomeID < 0 or missing backend.
+	// Hard gate: no evaluation episode may start with GenomeID < 0, missing backend, or without authorization.
 	int32 BadCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 	{
@@ -438,49 +490,43 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 		{
 			if (Agent->GenomeID < 0)
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] GUARD: Active batch agent %d has GenomeID < 0; cannot start evaluation. Assign genomes first."), i);
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] GUARD: Agent %d has GenomeID < 0; cannot start evaluation. RuntimeState=%d"),
+					i, (int32)Agent->GetRuntimeState());
 				BadCount++;
 			}
 			else if (!Agent->HasNEATPolicyBackend())
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] GUARD: Active batch agent %d (genome_id=%d) has no policy backend; cannot start evaluation."), i, Agent->GenomeID);
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] GUARD: Agent %d (genome_id=%d) has no policy backend; cannot start evaluation. RuntimeState=%d"),
+					i, Agent->GenomeID, (int32)Agent->GetRuntimeState());
+				BadCount++;
+			}
+			else if (!Agent->IsEvaluationAuthorized())
+			{
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] GUARD: Agent %d (genome_id=%d) is NOT authorized for evaluation. RuntimeState=%d. GrantEvaluationAuthorization() must be called first."),
+					i, Agent->GenomeID, (int32)Agent->GetRuntimeState());
 				BadCount++;
 			}
 		}
 	}
 	if (BadCount > 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Aborting StartEpisodeEvaluation: %d active batch agent(s) failed readiness (GenomeID or backend missing)."), BadCount);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Aborting StartEpisodeEvaluation: %d active batch agent(s) failed readiness gate."), BadCount);
 		return;
 	}
 
-	// Activate agents only when genomes are assigned and we are about to run episodes (no stepping before this).
-	int32 ActivatedCount = 0;
+	// Initialize authorized agents. Initialize() transitions state to Evaluating and enables ticking.
+	int32 InitializedCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 	{
 		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
-		if (Agent && !Agent->IsActive())
+		if (Agent && Agent->IsEvaluationAuthorized())
 		{
 			Agent->Initialize();
-			ActivatedCount++;
+			InitializedCount++;
 		}
 	}
-	if (ActivatedCount > 0)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Evaluation activated for %d agent(s) (genomes assigned; stepping begins)."), ActivatedCount);
-	}
-
-	// Reset only active batch agents (agents outside active batch are already force-ended in AssignGenomesToAgents)
-	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
-	{
-		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
-		if (Agent)
-		{
-			Agent->ResetEpisode();
-		}
-	}
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: reset %d active batch agents (gen=%d, batch_start=%d, batch_size=%d)"),
-		NumAgentsInCurrentBatch, CurrentGeneration, CurrentBatchStartIndex, NumAgentsInCurrentBatch);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: %d agent(s) initialized and now evaluating (Gen=%d, batch_start=%d, batch_size=%d)."),
+		InitializedCount, CurrentGeneration, CurrentBatchStartIndex, NumAgentsInCurrentBatch);
 
 	// Start evaluation timer
 	EvaluationTimeElapsed = 0.f;
@@ -490,8 +536,8 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 		GetWorld()->GetTimerManager().SetTimer(
 			EvaluationTickTimer,
 			FTimerDelegate::CreateUObject(this, &UNEATTrainingManager::TickEvaluation, 0.1f),
-			0.1f, // Timer rate
-			true  // Looping
+			0.1f,
+			true
 		);
 	}
 }
@@ -520,12 +566,12 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			LogGenerationEvaluationProgress(TEXT("batch_done"));
 			if (!IsGenerationFullyEvaluated())
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d: fitness map has %d entries but %d genomes; missing genome IDs. No genome may be silently skipped. Aborting export and stopping training."),
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Generation %d: fitness map has %d entries but %d genomes; missing genome IDs. No genome may be silently skipped. Aborting export and stopping training."),
 					CurrentGeneration, GenomeFitnessMap.Num(), CurrentGenomes.Num());
 				StopTraining();
 				return;
 			}
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation %d evaluation complete: all %d genomes evaluated; exporting fitness."), CurrentGeneration, CurrentGenomes.Num());
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Generation %d evaluation complete: all %d genomes evaluated; exporting fitness."), CurrentGeneration, CurrentGenomes.Num());
 
 			ExportFitnessValues();
 			CurrentGeneration++;
@@ -535,10 +581,10 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
+				UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
 				if (!FinalizeAndLoadBestGenome())
 				{
-					UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
+					UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
 				}
 				OnTrainingComplete.Broadcast();
 			}
@@ -550,14 +596,14 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		else
 		{
 			CurrentBatchStartIndex += NumAgentsInCurrentBatch;
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch complete; starting next batch: genome index from %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch complete; starting next batch: genome index from %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
 			AssignGenomesToAgents();
 			StartEpisodeEvaluation();
 		}
 	}
 	else if (EvaluationTimeElapsed >= MaxEpisodeDuration)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Evaluation timeout (%.1fs) for current batch"), MaxEpisodeDuration);
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Evaluation timeout (%.1fs) for current batch"), MaxEpisodeDuration);
 
 		for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 		{
@@ -582,7 +628,7 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			LogGenerationEvaluationProgress(TEXT("timeout_batch_done"));
 			if (!IsGenerationFullyEvaluated())
 			{
-				UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Generation %d (timeout): fitness map incomplete (%d/%d). No genome may be silently skipped. Aborting export and stopping training."),
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Generation %d (timeout): fitness map incomplete (%d/%d). No genome may be silently skipped. Aborting export and stopping training."),
 					CurrentGeneration, GenomeFitnessMap.Num(), CurrentGenomes.Num());
 				StopTraining();
 				return;
@@ -594,10 +640,10 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			if (CurrentGeneration >= NumGenerations)
 			{
 				TrainingState = ENEATTrainingState::Completed;
-				UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
+				UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Training completed (%d generations); finalizing best genome from last evaluated generation"), NumGenerations);
 				if (!FinalizeAndLoadBestGenome())
 				{
-					UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
+					UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome failed after training; best genome artifact is missing or invalid. Check generation_%d.json and genome files."), CurrentGeneration - 1);
 				}
 				OnTrainingComplete.Broadcast();
 			}
@@ -610,7 +656,7 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		{
 			CurrentBatchStartIndex += NumAgentsInCurrentBatch;
 			LogGenerationEvaluationProgress(TEXT("timeout_next_batch"));
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Timeout: starting next batch from genome index %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Timeout: starting next batch from genome index %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
 			AssignGenomesToAgents();
 			StartEpisodeEvaluation();
 		}
@@ -650,7 +696,7 @@ void UNEATTrainingManager::LogNEATStatusSummary(const TCHAR* Phase) const
 {
 	const FString ExportedFile = LastExportedFitnessFilePath.IsEmpty() ? TEXT("(none)") : LastExportedFitnessFilePath;
 	const FString BestGenomeFile = LastLoadedBestGenomePath.IsEmpty() ? TEXT("(none)") : LastLoadedBestGenomePath;
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT status [%s]: generation=%d, total_genomes=%d, completed_fitness=%d, exported_fitness_file=%s, loaded_best_genome=%s"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] NEAT status [%s]: generation=%d, total_genomes=%d, completed_fitness=%d, exported_fitness_file=%s, loaded_best_genome=%s"),
 		Phase, CurrentGeneration, CurrentGenomes.Num(), GenomeFitnessMap.Num(), *ExportedFile, *BestGenomeFile);
 }
 
@@ -659,7 +705,7 @@ void UNEATTrainingManager::LogGenerationEvaluationProgress(const TCHAR* Phase) c
 	const int32 Total = CurrentGenomes.Num();
 	const int32 Completed = GenomeFitnessMap.Num();
 	const int32 Pending = Total - Completed;
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation evaluation progress [%s]: completed=%d total=%d pending=%d current_batch_agents=%d"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Generation evaluation progress [%s]: completed=%d total=%d pending=%d current_batch_agents=%d"),
 		Phase, Completed, Total, Pending, NumAgentsInCurrentBatch);
 }
 
@@ -668,7 +714,7 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 	// Ignore events when not actively evaluating (can fire from force-ended or leftover episodes)
 	if (TrainingState != ENEATTrainingState::Evaluating)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Ignoring episode-done event outside Evaluating state (agent_id=%d, genome_id ignored)"), Stats.AgentInstanceID);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Ignoring episode-done event outside Evaluating state (agent_id=%d, genome_id ignored)"), Stats.AgentInstanceID);
 		return;
 	}
 
@@ -687,7 +733,7 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 
 		// Unambiguous match: this active-batch agent produced this episode result
 		GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Fitness attributed: agent_id=%d genome_id=%d fitness=%.2f termination=%s"),
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Fitness attributed: agent_id=%d genome_id=%d fitness=%.2f termination=%s"),
 			Stats.AgentInstanceID, Agent->GenomeID, Stats.NEATFitness, *Stats.TerminationReason);
 
 		if (Stats.NEATFitness > TrainingStats.BestFitness)
@@ -695,7 +741,7 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 			TrainingStats.BestFitness = Stats.NEATFitness;
 			TrainingStats.BestGenomeID = Agent->GenomeID;
 			OnNewBestGenome.Broadcast(Agent->GenomeID, Stats.NEATFitness);
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] New best genome: genome_id=%d fitness=%.2f"), Agent->GenomeID, Stats.NEATFitness);
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] New best genome: genome_id=%d fitness=%.2f"), Agent->GenomeID, Stats.NEATFitness);
 		}
 
 		TrainingStats.TotalEvaluations++;
@@ -703,7 +749,7 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 	}
 
 	// No match in active batch: reject with explicit log
-	UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Episode-done event rejected: agent_id=%d not found in active batch (batch_size=%d, total_agents=%d). This may be a deactivated inactive agent."),
+	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Episode-done event rejected: agent_id=%d not found in active batch (batch_size=%d, total_agents=%d). This may be a deactivated inactive agent."),
 		Stats.AgentInstanceID, NumAgentsInCurrentBatch, Agents.Num());
 }
 
@@ -718,7 +764,7 @@ void UNEATTrainingManager::ExportFitnessValues()
 	{
 		if (!GenomeFitnessMap.Contains(G.GenomeID))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] ExportFitnessValues: genome_id=%d has no fitness (partial export forbidden)."), G.GenomeID);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] ExportFitnessValues: genome_id=%d has no fitness (partial export forbidden)."), G.GenomeID);
 			return;
 		}
 	}
@@ -729,7 +775,7 @@ void UNEATTrainingManager::ExportFitnessValues()
 	{
 		if (!PlatformFile.CreateDirectoryTree(*Contract.FitnessDir))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to create fitness dir: %s"), *Contract.FitnessDir);
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to create fitness dir: %s"), *Contract.FitnessDir);
 			return;
 		}
 	}
@@ -765,20 +811,20 @@ void UNEATTrainingManager::ExportFitnessValues()
 
 	if (!FFileHelper::SaveStringToFile(JsonString, *OutputPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Failed to write fitness file: %s"), *OutputPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Failed to write fitness file: %s"), *OutputPath);
 		return;
 	}
 
 	if (!PlatformFile.FileExists(*OutputPath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Fitness file not found after write: %s"), *OutputPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Fitness file not found after write: %s"), *OutputPath);
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] HARD GATE: fitness export verified at %s (%d genomes)"), *OutputPath, GenomeFitnessMap.Num());
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] HARD GATE: fitness export verified at %s (%d genomes)"), *OutputPath, GenomeFitnessMap.Num());
 
 	LastExportedFitnessFilePath = OutputPath;
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Exported fitness for generation %d (%d genomes, Avg=%.2f) -> %s"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Exported fitness for generation %d (%d genomes, Avg=%.2f) -> %s"),
 		CurrentGeneration, GenomeFitnessMap.Num(), TrainingStats.AvgFitness, *OutputPath);
 
 	// Clear for next generation
@@ -795,7 +841,7 @@ void UNEATTrainingManager::TriggerPythonEvolution()
 {
 	if (!PythonExecutor)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] No Python executor!"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] No Python executor!"));
 		return;
 	}
 
@@ -803,14 +849,14 @@ void UNEATTrainingManager::TriggerPythonEvolution()
 	const FString ManifestPath = WriteContractManifest(Contract);
 	if (ManifestPath.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Cannot run Python without contract manifest"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Cannot run Python without contract manifest"));
 		return;
 	}
 
 	TrainingState = ENEATTrainingState::WaitingForPython;
 	bWaitingForPython = true;
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python/evolution triggered (generation %d, manifest=%s)"), CurrentGeneration, *ManifestPath);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python/evolution triggered (generation %d, manifest=%s)"), CurrentGeneration, *ManifestPath);
 
 	PythonExecutor->ExecuteTrainingAsync(PythonScriptPath, PythonExecutable, ManifestPath);
 }
@@ -822,14 +868,14 @@ int32 UNEATTrainingManager::ReadExportedGeneration() const
 
 	if (!FPaths::FileExists(StatePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json not found: %s. Python must write this file after every generation export."), *StatePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json not found: %s. Python must write this file after every generation export."), *StatePath);
 		return -1;
 	}
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *StatePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to read training_state.json: %s"), *StatePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to read training_state.json: %s"), *StatePath);
 		return -1;
 	}
 
@@ -837,18 +883,18 @@ int32 UNEATTrainingManager::ReadExportedGeneration() const
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to parse training_state.json: %s"), *StatePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to parse training_state.json: %s"), *StatePath);
 		return -1;
 	}
 
 	if (!Obj->HasField(TEXT("exported_generation")))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json missing 'exported_generation' field: %s"), *StatePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: training_state.json missing 'exported_generation' field: %s"), *StatePath);
 		return -1;
 	}
 
 	const int32 ExportedGen = Obj->GetIntegerField(TEXT("exported_generation"));
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] training_state.json: exported_generation=%d (path=%s)"), ExportedGen, *StatePath);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] training_state.json: exported_generation=%d (path=%s)"), ExportedGen, *StatePath);
 	return ExportedGen;
 }
 
@@ -858,12 +904,12 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 
 	if (!bSuccess)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Python evolution failed!"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Python evolution failed!"));
 		StopTraining();
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python evolution complete"));
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution complete"));
 
 	// Synchronize CurrentGeneration from training_state.json written by Python.
 	// This is the canonical source of truth for which generation Python just exported.
@@ -873,17 +919,17 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 		const int32 ExportedGen = ReadExportedGeneration();
 		if (ExportedGen < 0)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json is missing or invalid; cannot determine exported generation. Stopping training."));
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json is missing or invalid; cannot determine exported generation. Stopping training."));
 			StopTraining();
 			return;
 		}
 		if (ExportedGen != CurrentGeneration)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration %d -> %d (from training_state.json; likely a resumed run)"), CurrentGeneration, ExportedGen);
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration %d -> %d (from training_state.json; likely a resumed run)"), CurrentGeneration, ExportedGen);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration=%d matches exported_generation=%d (no correction needed)"), CurrentGeneration, ExportedGen);
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Generation sync: CurrentGeneration=%d matches exported_generation=%d (no correction needed)"), CurrentGeneration, ExportedGen);
 		}
 		CurrentGeneration = ExportedGen;
 	}
@@ -897,33 +943,33 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 			FString::Printf(TEXT("generation_%d_genomes.json"), CurrentGeneration));
 		if (!FPaths::FileExists(ExpectedGenomeList))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json says exported_generation=%d but genome list not found: %s. Python export may be incomplete or paths mismatched."),
+			UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] HARD GATE: training_state.json says exported_generation=%d but genome list not found: %s. Python export may be incomplete or paths mismatched."),
 				CurrentGeneration, *ExpectedGenomeList);
 			StopTraining();
 			return;
 		}
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Import handshake confirmed: training_state exported_generation=%d, genome list exists -> loading generation %d"),
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Import handshake confirmed: training_state exported_generation=%d, genome list exists -> loading generation %d"),
 			CurrentGeneration, CurrentGeneration);
 	}
 
 	// Load new genomes (validation: missing files, observation/action size, activation)
 	if (!LoadGenerationGenomes())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Failed to load new genomes (see validation errors above)."));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Failed to load new genomes (see validation errors above)."));
 		StopTraining();
 		return;
 	}
 
 	LogNEATStatusSummary(TEXT("AfterPythonLoad"));
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Python evolution complete: generation=%d, %d genomes loaded, %d agents registered"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution complete: generation=%d, %d genomes loaded, %d agents registered"),
 		CurrentGeneration, CurrentGenomes.Num(), Agents.Num());
 
 	CurrentBatchStartIndex = 0;
 	if (CurrentGenomes.Num() > Agents.Num())
 	{
 		const int32 NumBatches = (CurrentGenomes.Num() + Agents.Num() - 1) / Agents.Num();
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Batch mode: %d genomes, %d agents; evaluating in %d batch(es)"), CurrentGenomes.Num(), Agents.Num(), NumBatches);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch mode: %d genomes, %d agents; evaluating in %d batch(es)"), CurrentGenomes.Num(), Agents.Num(), NumBatches);
 	}
 	AssignGenomesToAgents();
 
@@ -938,54 +984,54 @@ bool UNEATTrainingManager::LoadBestGenome()
 
 	if (!FPaths::FileExists(BestGenomePath))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] Best genome file not found: %s"), *BestGenomePath);
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Best genome file not found: %s"), *BestGenomePath);
 		return false;
 	}
 
 	FNEATGenome BestGenome;
 	if (!UNEATGenomeImporter::LoadFromFile(BestGenomePath, BestGenome))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadBestGenome: LoadFromFile failed for %s"), *BestGenomePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] LoadBestGenome: LoadFromFile failed for %s"), *BestGenomePath);
 		return false;
 	}
 	if (!BestGenome.bIsValid)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadBestGenome: genome validation failed for %s"), *BestGenomePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] LoadBestGenome: genome validation failed for %s"), *BestGenomePath);
 		return false;
 	}
 
 	// Validation: observation/action size must match contract
 	if (BestGenome.NumInputs != Contract.ObservationSize)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Best genome observation size mismatch: genome num_inputs=%d, contract ObservationSize=%d"),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Best genome observation size mismatch: genome num_inputs=%d, contract ObservationSize=%d"),
 			BestGenome.NumInputs, Contract.ObservationSize);
 		return false;
 	}
 	if (BestGenome.NumOutputs != Contract.ActionSize)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Best genome action size mismatch: genome num_outputs=%d, contract ActionSize=%d"),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] VALIDATION FAILED: Best genome action size mismatch: genome num_outputs=%d, contract ActionSize=%d"),
 			BestGenome.NumOutputs, Contract.ActionSize);
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome loaded: %s (ID=%d, Gen=%d, Fitness=%.2f); building NEAT runtime backend"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Best genome loaded: %s (ID=%d, Gen=%d, Fitness=%.2f); building NEAT runtime backend"),
 		*BestGenomePath, BestGenome.GenomeID, BestGenome.Generation, BestGenome.Fitness);
 
 	UNEATGraphEvaluator* Evaluator = UNEATGraphEvaluator::CreateFromGenome(this, BestGenome);
 	if (!Evaluator)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadBestGenome failed: could not build NEAT evaluator for best genome"));
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] LoadBestGenome failed: could not build NEAT evaluator for best genome"));
 		return false;
 	}
 
 	if (Agents.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] LoadBestGenome: no agents registered; best genome loaded but not assigned"));
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] LoadBestGenome: no agents registered; best genome loaded but not assigned"));
 		LastLoadedBestGenomePath = BestGenomePath;
 		return true;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT runtime backend built for best genome; assigning to %d agent(s)"), Agents.Num());
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] NEAT runtime backend built for best genome; assigning to %d agent(s)"), Agents.Num());
 
 	int32 AssignedCount = 0;
 	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
@@ -999,12 +1045,12 @@ bool UNEATTrainingManager::LoadBestGenome()
 		Agent->Generation = BestGenome.Generation;
 		Agent->SetPolicyBackend(Evaluator);
 		AssignedCount++;
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome assigned: NEAT runtime backend set on agent (GenomeID=%d)"), BestGenome.GenomeID);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Best genome assigned: NEAT runtime backend set on agent (GenomeID=%d)"), BestGenome.GenomeID);
 	}
 
 	LastLoadedBestGenomePath = BestGenomePath;
 	LogNEATStatusSummary(TEXT("LoadBestGenome"));
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] LoadBestGenome complete: assigned to %d agent(s)"), AssignedCount);
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] LoadBestGenome complete: assigned to %d agent(s)"), AssignedCount);
 	return true;
 }
 
@@ -1021,7 +1067,7 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 
 	if (!FPaths::FileExists(FitnessFilePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: fitness file not found for generation %d: %s"),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: fitness file not found for generation %d: %s"),
 			LastEvaluatedGen, *FitnessFilePath);
 		return false;
 	}
@@ -1029,7 +1075,7 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *FitnessFilePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to read fitness file: %s"), *FitnessFilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to read fitness file: %s"), *FitnessFilePath);
 		return false;
 	}
 
@@ -1037,14 +1083,14 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to parse fitness JSON: %s"), *FitnessFilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to parse fitness JSON: %s"), *FitnessFilePath);
 		return false;
 	}
 
 	const TArray<TSharedPtr<FJsonValue>>* GenomesArray;
 	if (!JsonObject->TryGetArrayField(TEXT("genomes"), GenomesArray) || GenomesArray->Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: no genomes in fitness file: %s"), *FitnessFilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: no genomes in fitness file: %s"), *FitnessFilePath);
 		return false;
 	}
 
@@ -1065,7 +1111,7 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 
 	if (BestGenomeID < 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: could not determine best genome_id from %s"), *FitnessFilePath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: could not determine best genome_id from %s"), *FitnessFilePath);
 		return false;
 	}
 
@@ -1073,7 +1119,7 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 		FString::Printf(TEXT("genome_%d.json"), BestGenomeID));
 	if (!FPaths::FileExists(SourcePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: genome file not found: %s (genome_id=%d generation=%d)"),
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: genome file not found: %s (genome_id=%d generation=%d)"),
 			*SourcePath, BestGenomeID, LastEvaluatedGen);
 		return false;
 	}
@@ -1088,11 +1134,11 @@ bool UNEATTrainingManager::FinalizeAndLoadBestGenome()
 	}
 	if (!PlatformFile.CopyFile(*DestPath, *SourcePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to copy %s -> %s"), *SourcePath, *DestPath);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] FinalizeAndLoadBestGenome: failed to copy %s -> %s"), *SourcePath, *DestPath);
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome artifact finalized: generation=%d genome_id=%d fitness=%.2f -> %s"),
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Best genome artifact finalized: generation=%d genome_id=%d fitness=%.2f -> %s"),
 		LastEvaluatedGen, BestGenomeID, BestFitness, *DestPath);
 
 	return LoadBestGenome();
