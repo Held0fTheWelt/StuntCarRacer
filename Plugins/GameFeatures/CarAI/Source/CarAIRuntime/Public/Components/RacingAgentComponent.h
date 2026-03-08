@@ -26,6 +26,9 @@ class UPolicyBackend;
  * drive-forward. Missing backend is logged and agent applies zero action. Non-NEAT (GenomeID < 0)
  * may use PolicyBackend then PolicyNetwork, then optional fallback drive with explicit log.
  *
+ * Policy state: Use HasNEATPolicyBackend() for executable NEAT policy, HasFixedNetworkPolicy() for
+ * fixed network, HasAnyPolicy() for either. No policy loaded = both false.
+ *
  * Sensors: 8 Adaptive Rays + IMU + Vehicle State. Training: NEAT fitness = track progress (m) + speed bonus.
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
@@ -84,7 +87,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	int32 GetEpisodeStepCount() const { return EpisodeStepCount; }
 
-	/** True if a NEAT policy backend is set and valid (executable). */
+	/** True if a NEAT policy backend is set and valid (executable). Distinguish: no policy vs fixed network vs NEAT. */
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	bool HasNEATPolicyBackend() const;
 
@@ -92,7 +95,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	bool HasFixedNetworkPolicy() const { return PolicyNetwork != nullptr; }
 
-	/** True if the agent has any executable policy (NEAT or fixed network). */
+	/** True if the agent has any executable policy (NEAT or fixed network). No policy = both false. */
 	UFUNCTION(BlueprintCallable, Category = "Racing Agent")
 	bool HasAnyPolicy() const { return HasNEATPolicyBackend() || HasFixedNetworkPolicy(); }
 

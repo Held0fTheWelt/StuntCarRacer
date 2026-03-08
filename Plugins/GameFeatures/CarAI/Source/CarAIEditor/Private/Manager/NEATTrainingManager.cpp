@@ -308,10 +308,10 @@ bool UNEATTrainingManager::LoadGenerationGenomes()
 			return false;
 		}
 		CurrentGenomes.Add(LoadedGenome);
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome file loaded: %s (genome_id=%d, inputs=%d outputs=%d)"), *GenomePath, GenomeID, LoadedGenome.NumInputs, LoadedGenome.NumOutputs);
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome loaded: %s (genome_id=%d, inputs=%d outputs=%d)"), *GenomePath, GenomeID, LoadedGenome.NumInputs, LoadedGenome.NumOutputs);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated)"),
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Loaded %d genomes for generation %d (all validated); ready for AssignGenomesToAgents"),
 		CurrentGenomes.Num(), CurrentGeneration);
 
 	return CurrentGenomes.Num() > 0;
@@ -373,11 +373,12 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 		{
 			Agent->SetPolicyBackend(Evaluator);
 			AssignedCount++;
-			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome assigned to agent (agent_index=%d, genome_id=%d, genome_index=%d)"), i, Genome.GenomeID, GenomeIndex);
+			UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Genome assigned: NEAT runtime backend set on agent (agent_index=%d, genome_id=%d, genome_index=%d)"), i, Genome.GenomeID, GenomeIndex);
 		}
 		else
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Assignment failure: could not build NEAT evaluator for genome_id=%d (genome_index=%d)"), Genome.GenomeID, GenomeIndex);
+			Agent->SetPolicyBackend(nullptr);
+			UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] Assignment failure: could not build NEAT evaluator for genome_id=%d (genome_index=%d); cleared policy backend for agent"), Genome.GenomeID, GenomeIndex);
 		}
 	}
 
@@ -770,21 +771,24 @@ bool UNEATTrainingManager::LoadBestGenome()
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome file loaded: %s (ID=%d, Gen=%d, Fitness=%.2f)"),
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome loaded: %s (ID=%d, Gen=%d, Fitness=%.2f); building NEAT runtime backend"),
 		*BestGenomePath, BestGenome.GenomeID, BestGenome.Generation, BestGenome.Fitness);
 
 	UNEATGraphEvaluator* Evaluator = UNEATGraphEvaluator::CreateFromGenome(this, BestGenome);
 	if (!Evaluator)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadBestGenome: failed to build NEAT evaluator for best genome"));
+		UE_LOG(LogTemp, Error, TEXT("[NEATTrainingManager] LoadBestGenome failed: could not build NEAT evaluator for best genome"));
 		return false;
 	}
 
 	if (Agents.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[NEATTrainingManager] LoadBestGenome: no agents registered; best genome loaded but not assigned"));
+		LastLoadedBestGenomePath = BestGenomePath;
 		return true;
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] NEAT runtime backend built for best genome; assigning to %d agent(s)"), Agents.Num());
 
 	int32 AssignedCount = 0;
 	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
@@ -798,11 +802,11 @@ bool UNEATTrainingManager::LoadBestGenome()
 		Agent->Generation = BestGenome.Generation;
 		Agent->SetPolicyBackend(Evaluator);
 		AssignedCount++;
-		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome assigned to agent (GenomeID=%d)"), BestGenome.GenomeID);
+		UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] Best genome assigned: NEAT runtime backend set on agent (GenomeID=%d)"), BestGenome.GenomeID);
 	}
 
 	LastLoadedBestGenomePath = BestGenomePath;
 	LogNEATStatusSummary(TEXT("LoadBestGenome"));
-	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] LoadBestGenome: assigned to %d agent(s)"), AssignedCount);
+	UE_LOG(LogTemp, Log, TEXT("[NEATTrainingManager] LoadBestGenome complete: assigned to %d agent(s)"), AssignedCount);
 	return true;
 }
