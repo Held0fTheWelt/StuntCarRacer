@@ -583,18 +583,26 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Step %d (GenomeID=%d)"), *GetAgentLogId(), EpisodeStepCount, GenomeID);
 	}
 
-	// MVP-02: Startup diagnostics for first 5 frames (captures initial vehicle state)
-	if (EpisodeStepCount <= 5)
+	// MVP-02: Enhanced startup diagnostics for first 30 frames
+	if (EpisodeStepCount <= 30)
 	{
-		const FVector ActorLoc = Vehicle ? Vehicle->GetActorLocation() : FVector::Zero();
 		const FVector ActorVel = Vehicle ? Vehicle->GetVelocity() : FVector::Zero();
-		const float ForwardSpeed = ActorVel.X; // Assuming vehicle X is forward in local frame
-		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STARTUP DIAG [frame=%d t=%.2fs]: loc=(%.0f,%.0f,%.0f) vel_forward=%.1f stagger=%dcm grace_remain=%.2fs diag_remain=%.2fs stuck_timer=%.2f grounded_frames=%d"),
-			*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, ActorLoc.X, ActorLoc.Y, ActorLoc.Z, ForwardSpeed,
-			(int32)SpawnDistanceAlongTrackCm,
-			FMath::Max(0.f, EpisodeGraceTimeRemaining),
-			FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum),
-			StuckTimeAccum, GroundedFrameCount);
+		const float ForwardSpeed_CmS = ActorVel.X; // World forward velocity in cm/s
+		const bool bForcedForwardWindowActive = (bEnableForcedForwardDiagnostic && EpisodeTimeAccum < ForcedForwardDiagnosticDuration);
+
+		if (EpisodeStepCount <= 15 || StuckTimeAccum > 0.f)  // Log first 15 frames always, then only if Stuck accumulating
+		{
+			UE_LOG(LogCarAIAgent, Warning,
+				TEXT("[%s] STARTUP_FRAME [%d] t=%.3f grace=%.2f ff_window=%d ff_enabled=%d action_throttle=pending speed_norm=%.3f vel_forward=%.1f stuck_accum=%.3f stuck_thresh=%.1f grounded_frames=%d"),
+				*GetAgentLogId(),
+				EpisodeStepCount, EpisodeTimeAccum,
+				FMath::Max(0.f, EpisodeGraceTimeRemaining),
+				bForcedForwardWindowActive ? 1 : 0,
+				bEnableForcedForwardDiagnostic ? 1 : 0,
+				Obs.SpeedNorm, ForwardSpeed_CmS,
+				StuckTimeAccum, RewardCfg.StuckTimeSeconds,
+				GroundedFrameCount);
+		}
 	}
 
 	// 1. Build Observation
@@ -1328,31 +1336,44 @@ bool URacingAgentComponent::CheckTerminalConditions(const FRacingObservation& Ob
 	// Stuck — suppressed during grace window and during forced-forward diagnostic window.
 	const bool bStuckSuppressed = (EpisodeGraceTimeRemaining > 0.f) ||
 		(bEnableForcedForwardDiagnostic && EpisodeTimeAccum < ForcedForwardDiagnosticDuration);
+
+	// MVP-02: Track first frame where Stuck starts accumulating (not suppressed)
+	static bool bStuckFirstAccumFrame = true;
+
 	if (!bStuckSuppressed)
 	{
 		if (Obs.SpeedNorm < RewardCfg.StuckSpeedNorm)
 		{
-			StuckTimeAccum += DeltaTime;
-			// MVP-02: Log Stuck threshold accumulation for first frames to understand timing
-			if (EpisodeStepCount <= 10)
+			// Log the exact frame where Stuck first starts accumulating
+			if (StuckTimeAccum == 0.f && bStuckFirstAccumFrame)
 			{
-				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK CHECK [frame=%d t=%.2f]: SpeedNorm=%.3f (threshold=%.3f) StuckAccum=%.2f/%.2f grace_remain=%.2f diag_remain=%.2f"),
-					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Obs.SpeedNorm, RewardCfg.StuckSpeedNorm, StuckTimeAccum, RewardCfg.StuckTimeSeconds,
-					EpisodeGraceTimeRemaining, FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum));
+				bStuckFirstAccumFrame = false;
+				UE_LOG(LogCarAIAgent, Error, TEXT("[%s] STUCK_ACCUM_START [frame=%d t=%.3f]: first accumulation (speed=%.3f < threshold=%.3f)"),
+					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Obs.SpeedNorm, RewardCfg.StuckSpeedNorm);
 			}
+
+			StuckTimeAccum += DeltaTime;
+
+			// Log every frame during Stuck accumulation for first 30 frames
+			if (EpisodeStepCount <= 30)
+			{
+				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK_ACCUM [frame=%d t=%.3f]: accum=%.3f/%.3f speed=%.3f suppressed=NO"),
+					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, StuckTimeAccum, RewardCfg.StuckTimeSeconds, Obs.SpeedNorm);
+			}
+
 			if (StuckTimeAccum >= RewardCfg.StuckTimeSeconds)
 			{
 				OutReason = TEXT("Stuck");
-				UE_LOG(LogCarAIAgent, Error, TEXT("[%s] STUCK TRIGGERED [frame=%d t=%.2f]: accumulator=%.2f exceeded threshold=%.2f speed=%.3f"),
+				UE_LOG(LogCarAIAgent, Error, TEXT("[%s] STUCK_TRIGGERED [frame=%d t=%.3f]: accumulator=%.3f >= threshold=%.3f speed=%.3f"),
 					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, StuckTimeAccum, RewardCfg.StuckTimeSeconds, Obs.SpeedNorm);
 				return true;
 			}
 		}
 		else
 		{
-			if (EpisodeStepCount <= 10 && StuckTimeAccum > 0.f)
+			if (StuckTimeAccum > 0.f && EpisodeStepCount <= 30)
 			{
-				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK RESET [frame=%d t=%.2f]: SpeedNorm=%.3f exceeded threshold=%.3f, resetting accumulator"),
+				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK_RESET [frame=%d t=%.3f]: speed=%.3f >= threshold=%.3f, resetting to 0"),
 					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Obs.SpeedNorm, RewardCfg.StuckSpeedNorm);
 			}
 			StuckTimeAccum = 0.f;
@@ -1360,11 +1381,12 @@ bool URacingAgentComponent::CheckTerminalConditions(const FRacingObservation& Ob
 	}
 	else
 	{
-		if (EpisodeStepCount <= 10 && StuckTimeAccum > 0.f)
+		if (StuckTimeAccum > 0.f && EpisodeStepCount <= 30)
 		{
-			UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK SUPPRESSED [frame=%d t=%.2f]: grace_remain=%.2f diag_remain=%.2f, resetting accumulator"),
-				*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, EpisodeGraceTimeRemaining,
-				FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum));
+			UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK_SUPPRESSED [frame=%d t=%.3f]: accum=%.3f reset (grace=%.2f diag_window=%s)"),
+				*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, StuckTimeAccum,
+				EpisodeGraceTimeRemaining,
+				(bEnableForcedForwardDiagnostic && EpisodeTimeAccum < ForcedForwardDiagnosticDuration) ? TEXT("ON") : TEXT("OFF"));
 		}
 		StuckTimeAccum = 0.f; // Reset during suppressed window so it starts fresh after grace.
 	}
@@ -1432,10 +1454,10 @@ void URacingAgentComponent::ApplyAction(const FVehicleAction& Action)
 		return;
 	}
 
-	// MVP-02: Log action application for first frames to diagnose vehicle control
-	if (EpisodeStepCount <= 10 && (Action.Throttle > 0.1f || Action.Steer != 0.f || Action.Brake > 0.1f))
+	// MVP-02: Log action application for all first 30 frames
+	if (EpisodeStepCount <= 30)
 	{
-		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] ACTION APPLIED [frame=%d t=%.2f]: Steer=%.2f Throttle=%.2f Brake=%.2f"),
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] ACTION_FRAME [%d] t=%.3f steer=%.2f throttle=%.2f brake=%.2f"),
 			*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Action.Steer, Action.Throttle, Action.Brake);
 	}
 
