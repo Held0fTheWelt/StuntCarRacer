@@ -583,7 +583,10 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Step %d (GenomeID=%d)"), *GetAgentLogId(), EpisodeStepCount, GenomeID);
 	}
 
-	// MVP-02: Enhanced startup diagnostics for first 30 frames
+	// 1. Build Observation
+	FRacingObservation Obs = BuildObservation();
+
+	// MVP-02: Enhanced startup diagnostics for first 30 frames (after Obs is available)
 	if (EpisodeStepCount <= 30)
 	{
 		const FVector ActorVel = Vehicle ? Vehicle->GetVelocity() : FVector::Zero();
@@ -593,7 +596,7 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		if (EpisodeStepCount <= 15 || StuckTimeAccum > 0.f)  // Log first 15 frames always, then only if Stuck accumulating
 		{
 			UE_LOG(LogCarAIAgent, Warning,
-				TEXT("[%s] STARTUP_FRAME [%d] t=%.3f grace=%.2f ff_window=%d ff_enabled=%d action_throttle=pending speed_norm=%.3f vel_forward=%.1f stuck_accum=%.3f stuck_thresh=%.1f grounded_frames=%d"),
+				TEXT("[%s] STARTUP_FRAME [%d] t=%.3f grace=%.2f ff_window=%d ff_enabled=%d speed_norm=%.3f vel_forward=%.1f stuck_accum=%.3f stuck_thresh=%.1f grounded_frames=%d"),
 				*GetAgentLogId(),
 				EpisodeStepCount, EpisodeTimeAccum,
 				FMath::Max(0.f, EpisodeGraceTimeRemaining),
@@ -604,9 +607,6 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 				GroundedFrameCount);
 		}
 	}
-
-	// 1. Build Observation
-	FRacingObservation Obs = BuildObservation();
 	LastObservation = Obs;
 
 	if (Obs.Vector.Num() == 0)
