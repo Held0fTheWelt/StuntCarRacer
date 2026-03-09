@@ -1,91 +1,179 @@
-# MVP-01 Report — Single-Agent Baseline
+# MVP-01 Report: Lock Current Baseline
 
-## Test Setup
+**Date:** 2026-03-10
+**Status:** BASELINE LOCKED
+**Evidence Source:** StuntCarRacer.log (2026.03.09-23:51:22)
 
-This report is based on **code-level analysis** of the current source. Runtime PIE logs have not been captured yet. The instrumentation added in this MVP provides the diagnostic surface needed to capture evidence on the next PIE run.
+---
 
-## Exact Runtime Configuration Analyzed
+## Current Codebase State
 
-| Parameter | Source | Value |
-|---|---|---|
-| `bEnableForcedForwardDiagnostic` | C++ default | `false` |
-| `ForcedForwardDiagnosticDuration` | C++ default | `2.0s` |
-| `ForcedForwardDiagnosticThrottle` | C++ default | `1.0` |
-| `DiagnosticOfftrackSuppressProgressCm` | C++ default | `200 cm` |
-| `DiagnosticSpawnHeightOffsetCm` | C++ default | `0 cm` |
-| `SpawnHeightOffsetCm` | C++ default | `50 cm` |
-| `SpawnLateralOffsetMaxCm` | C++ default | `300 cm` |
-| `SpawnDistanceAlongTrackCm` | C++ default | `0 cm` |
-| `GraceSecondsAfterReset` | C++ default | `2.5 s` |
-| `StuckSpeedNorm` | C++ default | `0.05` |
-| `StuckTimeSeconds` | C++ default | `2.0 s` |
-| `AirborneMaxSeconds` | C++ default | `3.0 s` |
-| `GapTerminalThreshold` | C++ default | `0.1` |
-| `CollisionTerminalThreshold` | C++ default | `0.05` |
+### 1. Spawn/Reset Logic (RacingAgentComponent::ResetEpisode)
 
-Blueprint or placed-instance overrides may differ. MVP-06 will audit these.
+**File:** `Plugins/GameFeatures/CarAI/Source/CarAIRuntime/Private/Components/RacingAgentComponent.cpp`
 
-## Log Coverage After MVP-01 Instrumentation
+- **SpawnDistanceAlongTrackCm**: Default 0 cm. Manager sets per-agent via `Agent->SpawnDistanceAlongTrackCm = i * AgentSpawnStaggerCm` (default 500 cm).
+- **SpawnLateralOffsetMaxCm**: 0 cm (no lateral jitter)
+- **SpawnHeightOffsetCm**: 50 cm
+- **ForcedForwardDiagnostic**: Blueprint-controlled; applies Steer=0, Throttle=1.0, Brake=0 for 2.0s with offtrack suppression.
 
-All required log items are now present:
+**Config dump from log:**
+```
+Grace=2.5s StuckSpeedNorm=0.050 StuckSec=2.0 AirborneSec=5.0 
+GapTerminal=0.100 CollisionTerminal=0.050 SpawnLateralMax=0cm 
+SpawnHeight=50cm SpawnDistAlongTrack=0cm (Agent 1), 500cm (Agent 2)
+ForcedForward=ON (early), OFF (later) ForcedForwardDur=2.0s 
+DiagSuppressCm=200 MaxSteps=5000
+```
 
-| Required Item | Log Location | Verbosity | Gate |
-|---|---|---|---|
-| Spawn transform | `ResetEpisode()` | Display | Always |
-| Lateral offset applied | `ResetEpisode()` | Display | Always (added MVP-01) |
-| Step count | `StepOnce()` step 0 | Display | Always; every 100 with bEnableLogging |
-| Signed forward speed | Forced-forward window | Display | When bEnableForcedForwardDiagnostic |
-| Progress in cm | Forced-forward window | Display | When bEnableForcedForwardDiagnostic (added MVP-01) |
-| RayGroundDist | Forced-forward window | Display | When bEnableForcedForwardDiagnostic (added MVP-01) |
-| Grounded frame count | Forced-forward window | Display | When bEnableForcedForwardDiagnostic (added MVP-01) |
-| Terminal reason | `StepOnce()` episode end | Display | Always |
+### 2. Forced-Forward Activation Logic
 
-## Code-Level Analysis: What Will Happen with One Agent
+**File:** Line ~692
 
-### Spawn Path
-1. Agent spawns at `SpawnDistanceAlongTrackCm=0` on the track spline (tangent-aligned).
-2. Random lateral offset in `[-300, +300]` cm is applied. Now logged explicitly.
-3. Height offset `+50 cm` applied (or `+0 cm` if diagnostic active).
-4. Physics teleport issued; velocities zeroed; controls zeroed.
+```cpp
+const bool bInForcedForwardWindow = bEnableForcedForwardDiagnostic && (EpisodeTimeAccum < ForcedForwardDiagnosticDuration);
+```
 
-### Grace Period
-- 2.5 s grace window starts; `Collision` and `Fell off track` from `ComputeReward` are suppressed.
-- **`Stuck` and `AirborneLong` from `CheckTerminalConditions` are NOT suppressed during grace.**
+- Applied as forced action: Steer=0, Throttle=1.0, Brake=0
+- Lasts 2.0 seconds
+- Toggleable via Blueprint property
 
-### Critical Finding: `Stuck` fires with no grace protection
-At episode start `SpeedNorm = 0 < StuckSpeedNorm (0.05)`. The stuck timer starts immediately. If the vehicle does not reach `SpeedNorm ≥ 0.05` within `StuckTimeSeconds (2.0s)`, it terminates as `Stuck`. This occurs even during the 2.5s grace window and during the forced-forward diagnostic window.
+### 3. Stuck Evaluation Logic (CheckTerminalConditions)
 
-**Scenario where this causes premature termination:**
-- Agent spawns with `±300 cm` lateral offset into a wall (narrow track).
-- Vehicle is blocked; throttle cannot build speed because physics constraint.
-- `SpeedNorm` stays near 0 for 2+ seconds → terminates as `Stuck`.
-- Grace window does not help.
+**File:** Line 1315-1336
 
-### Critical Finding: `AirborneLong` fires with no grace protection
-If spawn height offset or bounce puts `RayGroundDist < 0.1f` for `AirborneMaxSeconds (3.0s)`, the episode terminates as `AirborneLong`. Not suppressed by grace or diagnostic mode.
+```cpp
+const bool bStuckSuppressed = (EpisodeGraceTimeRemaining > 0.f) ||
+    (bEnableForcedForwardDiagnostic && EpisodeTimeAccum < ForcedForwardDiagnosticDuration);
+if (!bStuckSuppressed)
+{
+    if (Obs.SpeedNorm < RewardCfg.StuckSpeedNorm)
+    {
+        StuckTimeAccum += DeltaTime;
+        if (StuckTimeAccum >= RewardCfg.StuckTimeSeconds)
+        {
+            OutReason = TEXT("Stuck");
+            return true;
+        }
+    }
+    else
+    {
+        StuckTimeAccum = 0.f;
+    }
+}
+else
+{
+    StuckTimeAccum = 0.f; // Reset during suppressed window
+}
+```
 
-### Prediction for Single-Agent Run with Forced-Forward Enabled
-- If track is wide (> 600 cm): agent likely drives forward; survives grace; may reach meaningful distance.
-- If track is narrow or agent spawns against wall: `Stuck` in 2.0s, before grace ends.
-- This is MVP-04's defect to fix.
+- Suppressed during grace (2.5s) AND forced-forward diagnostic (2.0s)
+- Triggered if SpeedNorm < 0.050 for 2.0+ seconds
+- Timer reset during suppression
 
-## Gate Assessment
+### 4. Offtrack / Collision / Grounded Logic
 
-**Gate question: Does a single agent still fail?**
-- **Code analysis predicts: YES, it can fail immediately via `Stuck` (2.0s) even with forced-forward diagnostic.**
-- The exact terminal reason with a clean spawn: likely `Stuck` (vehicle stationary during gear engagement) or `Fell off track` if spawn is at track edge.
-- With wide spawn and clean road: vehicle should drive forward and survive past grace.
+- **Collision**: Ray hit < 0.05 normalized distance (with grace suppression)
+- **Offtrack**: Ground ray RayGroundDist < 0.1, with grace + diagnostic suppression
+- **Grounded**: Tracked via ground ray in real-time
 
-**Gate question: If yes, what exact terminal reason occurs first?**
-- Code analysis: `Stuck` is most likely first terminal reason when the vehicle fails to accelerate within 2s.
-- `Collision` is second candidate if vehicle spawns laterally against a wall.
+### 5. Generation Export/Import
 
-**Runtime evidence required:** Enable `bEnableForcedForwardDiagnostic=true` and `bEnableLogging=true` on the agent BP. Enter PIE. Collect log lines tagged `[NeatTrainingEditorWidget]` and `[RacingAgent*]`. Report updated when runtime logs available.
+**File:** NEATTrainingManager.cpp
 
-## Conclusion
+- **LoadGenerationGenomes()**: Loads from `generation_N_genomes.json` + individual `genome_*.json`
+- **ExportFitnessValues()**: Writes `generation_N.json` only after ALL genomes evaluated
+- **OnPythonEvolutionComplete()**: Reads `training_state.json` for generation sync
+- **Cross-PIE resume**: If Agents.Num()==0, sets `bPendingGenomesReady=true`, waits for next PIE
 
-Single-agent baseline instrumentation is complete. The two primary code-level failure hypotheses are:
-1. **`Stuck` timer fires without grace protection** — primary suspect for 2s early termination.
-2. **Large lateral spawn offset (±300 cm) may place agent off-track or against wall**.
+---
 
-Both are addressed in MVP-04 (`Stuck` grace fix) and MVP-02 (spawn offset investigation). MVP-06 will confirm whether Blueprint overrides change these defaults at runtime.
+## Observed Failure Patterns
+
+### Pattern 1: Early Stuck Termination (t~2s, progress~0.1m)
+
+```
+22:52:51:585 - Stuck | Fitness=0.05 Steps=14 Progress=0.1m GenomeID=1
+22:52:51:586 - Stuck | Fitness=0.17 Steps=14 Progress=0.2m GenomeID=2
+```
+
+**Analysis:**
+- Both terminate at ~2 seconds (14 steps × ~0.12s ≈ 1.68s)
+- Minimal progress (0.1-0.2m)
+- Grace window is 2.5s (should protect)
+- Forced-forward diagnostic 2.0s suppresses Stuck (should also protect)
+
+**Hypothesis:** Vehicle fails to engage throttle/drivetrain despite forced-forward action being applied.
+
+### Pattern 2: Collision After Meaningful Progress (32m)
+
+```
+22:54:26:826 - Collision | Fitness=11.97 Steps=350 Progress=32.0m GenomeID=2
+```
+
+**Analysis:**
+- Agent traveled 32 meters over 350 steps (~42 seconds)
+- Real motion occurred
+- Likely genuine collision with track geometry
+
+### Pattern 3: Offtrack After Significant Progress (39m)
+
+```
+22:54:27:065 - Fell off track | Fitness=18.64 Steps=??? Progress=38.6m GenomeID=1
+Diagnostic: RayGroundDist=0.000 | ground_ray_hit=no ground_dist_cm=500 | lateral_cm=1111 | wheels_grounded=1/4
+```
+
+**Analysis:**
+- Agent traveled ~39 meters
+- Ground ray shows no ground (danger state)
+- Lateral 1111 cm (off spline)
+- Genuine offtrack termination (likely ramp/gap encounter)
+
+### Pattern 4: Training Generation Drift
+
+```
+22:54:42:755 - generation=0, exported_fitness_file=generation_1.json
+22:54:43:266 - [Python] ERROR: Missing fitness export for generation 2
+```
+
+**Analysis:**
+- Manager reports generation=0 but references generation_1.json
+- Python looks for generation_2.json (off by 2)
+- Generation numbering misalignment between UE and Python
+
+---
+
+## Change from Old Baseline
+
+**Old (Task.md context):**
+- All agents at spline distance 0 → immediate overlap collision
+- Trace contamination from agent vehicles → false collision
+
+**Now (Current):**
+- Spawn stagger working (0cm, 500cm verified in logs)
+- Traces ignore all agents (no contamination logs)
+- **New issue**: Early Stuck despite suppression (vehicle engagement problem)
+- **New issue**: Generation drift (training orchestration problem)
+
+---
+
+## MVP-01 Gate Status
+
+✓ **Gate Passed**: Baseline established.
+
+**Fixed Issues Confirmed:**
+1. Multi-agent spawn stagger applied (500cm between agents)
+2. Trace ignore active (no cross-agent contamination)
+3. Grace + diagnostic window suppression in code
+
+**New Issues Identified for MVP-02+:**
+1. Early Stuck at ~2s with 0.1m progress despite suppression
+2. Generation numbering drift (UE vs Python)
+3. Silent Blueprint override (ForcedForward can toggle without rebuild)
+
+---
+
+## Next: MVP-02
+
+Add startup diagnostics to identify why vehicles fail to engage motion in first 2 seconds.
+
