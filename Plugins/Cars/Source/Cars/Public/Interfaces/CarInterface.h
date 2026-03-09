@@ -6,6 +6,9 @@
 #include "UObject/Interface.h"
 #include "CarInterface.generated.h"
 
+class AActor;
+class UPrimitiveComponent;
+
 // This class does not need to be modified.
 UINTERFACE(MinimalAPI)
 class UCarInterface : public UInterface
@@ -14,14 +17,23 @@ class UCarInterface : public UInterface
 };
 
 /**
- * 
+ * Abstraction for the actual car actor and its controls/state.
+ * Implemented by the car pawn; when RacingAgentComponent is owned by a controller,
+ * the component resolves the car via the possessed pawn implementing this interface.
  */
 class CARS_API ICarInterface
 {
 	GENERATED_BODY()
 
-	// Add interface functions to this class. This is the class that will be inherited to implement this interface.
 public:
+	/** Returns the car actor (for transform, root component, physics). Pawn returns this; controller implementations return the possessed pawn. */
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Racing|Actor")
+	AActor* GetCarActor() const;
+
+	/** Returns the root primitive used for physics, traces, and observations. Null if car has no primitive root. */
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Racing|Actor")
+	UPrimitiveComponent* GetCarRootPrimitive() const;
+
 	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = Default)
 	const UChaosWheeledVehicleMovementComponent* GetCarChaosVehicleMovement() const;
 

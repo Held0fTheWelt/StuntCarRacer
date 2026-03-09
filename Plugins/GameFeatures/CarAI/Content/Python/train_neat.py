@@ -56,6 +56,7 @@ def _config_template(obs_size: int, action_size: int, pop_size: int) -> str:
 [NEAT]
 fitness_criterion     = max
 fitness_threshold     = 1000.0
+no_fitness_termination = False
 pop_size              = {pop_size}
 reset_on_extinction   = False
 
@@ -71,6 +72,7 @@ aggregation_mutate_rate = 0.0
 aggregation_options     = sum
 
 # node bias options
+bias_init_type          = gaussian
 bias_init_mean          = 0.0
 bias_init_stdev         = 1.0
 bias_max_value          = 30.0
@@ -90,6 +92,8 @@ conn_delete_prob        = 0.5
 # connection enable options
 enabled_default         = True
 enabled_mutate_rate     = 0.01
+enabled_rate_to_true_add  = 0.0
+enabled_rate_to_false_add = 0.0
 
 feed_forward            = True
 initial_connection      = full
@@ -98,12 +102,17 @@ initial_connection      = full
 node_add_prob           = 0.2
 node_delete_prob        = 0.2
 
+# structural mutation options (required by neat-python >= 0.92)
+single_structural_mutation = false
+structural_mutation_surer  = default
+
 # network parameters
 num_hidden              = 0
 num_inputs              = {obs_size}
 num_outputs             = {action_size}
 
 # node response options
+response_init_type      = gaussian
 response_init_mean      = 1.0
 response_init_stdev     = 0.0
 response_max_value      = 30.0
@@ -113,6 +122,7 @@ response_mutate_rate    = 0.0
 response_replace_rate   = 0.0
 
 # connection weight options
+weight_init_type        = gaussian
 weight_init_mean        = 0.0
 weight_init_stdev       = 1.0
 weight_max_value        = 30.0
@@ -132,6 +142,7 @@ species_elitism      = 2
 [DefaultReproduction]
 elitism            = 2
 survival_threshold = 0.2
+min_species_size   = 1
 """.format(obs_size=obs_size, action_size=action_size, pop_size=pop_size)
 
 # ============================================================================
@@ -231,11 +242,11 @@ class FitnessLoader:
         fitness_files = sorted(self.fitness_dir.glob("generation_*.json"))
         
         if not fitness_files:
-            print(f"⚠️  No fitness files found in {self.fitness_dir}")
+            print(f"[NEAT] No fitness files found in {self.fitness_dir}")
             return {}
         
         latest_file = fitness_files[-1]
-        print(f"📂 Loading fitness from: {latest_file.name}")
+        print(f"[NEAT] Loading fitness from: {latest_file.name}")
         
         with open(latest_file, 'r') as f:
             data = json.load(f)
@@ -246,7 +257,7 @@ class FitnessLoader:
             fitness = genome_data["fitness"]
             fitness_map[gid] = fitness
         
-        print(f"   ✓ Loaded {len(fitness_map)} fitness values")
+        print(f"[NEAT] Loaded {len(fitness_map)} fitness values")
         return fitness_map
 
 # ============================================================================
@@ -288,8 +299,18 @@ class GenomeExporter:
             "nodes": [],
             "connections": []
         }
-        
-        # Export nodes
+
+        # Input pins in NEAT have negative keys (-1 .. -num_inputs). Unreal expects every
+        # connection endpoint to exist in the nodes array, so add synthetic input nodes.
+        for input_key in config.genome_config.input_keys:
+            data["nodes"].append({
+                "id": input_key,
+                "activation": "tanh",
+                "bias": 0.0,
+                "response": 1.0
+            })
+
+        # Export real nodes (output + hidden)
         for node_id, node in genome.nodes.items():
             data["nodes"].append({
                 "id": node_id,
@@ -315,7 +336,7 @@ class GenomeExporter:
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
         if verbose:
-            print(f"💾 Exported genome {genome_id} to: {output_file.name}")
+            print(f"[NEAT] Exported genome {genome_id} to: {output_file.name}")
 
 
 TRAINING_STATE_FILENAME = "training_state.json"
@@ -362,7 +383,7 @@ def export_population_for_unreal(
     genome_list = [{"genome_id": gid, "generation": unreal_generation} for gid, _ in genomes]
     with open(list_file, "w") as f:
         json.dump({"generation": unreal_generation, "population_size": len(genome_list), "genomes": genome_list}, f, indent=2)
-    print(f"📤 Exported {len(genomes)} genomes for Unreal generation {unreal_generation} -> {list_file.name}")
+    print(f"[NEAT] Exported {len(genomes)} genomes for Unreal generation {unreal_generation} -> {list_file.name}")
 
     for genome_id, genome in genomes:
         genome_file = output_dir / f"genome_{genome_id}.json"
@@ -409,29 +430,106 @@ def log_resolved_contract(contract: dict) -> None:
     print("[NEAT contract] --- end contract ---")
 
 
+# Required fields per INI section that must be present for neat-python compatibility.
+# Keys are INI section names; values are tuples of required field names.
+# Extend this dict when future neat-python versions add more required fields.
+REQUIRED_CONFIG_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "NEAT": ("no_fitness_termination",),
+    "DefaultReproduction": ("min_species_size",),
+    "DefaultGenome": (
+        "single_structural_mutation", "structural_mutation_surer", "bias_init_type",
+        "response_init_type", "weight_init_type",
+        "enabled_rate_to_true_add", "enabled_rate_to_false_add",
+    ),
+}
+
+
+def _parse_ini_sections(text: str) -> Dict[str, str]:
+    """
+    Parse an INI-style config into {section_name: section_body} dict.
+    Section body is the raw text between the section header and the next header (or EOF).
+    """
+    import re
+    sections: Dict[str, str] = {}
+    current_section: Optional[str] = None
+    body_lines: List[str] = []
+    for line in text.splitlines():
+        header = re.match(r"^\[(\w+)\]", line.strip())
+        if header:
+            if current_section is not None:
+                sections[current_section] = "\n".join(body_lines)
+            current_section = header.group(1)
+            body_lines = []
+        else:
+            body_lines.append(line)
+    if current_section is not None:
+        sections[current_section] = "\n".join(body_lines)
+    return sections
+
+
+def _find_missing_fields(config_text: str) -> List[str]:
+    """
+    Return list of 'section.field' strings that are required but absent in config_text.
+    Checks each required field only within the correct INI section body.
+    """
+    import re
+    sections = _parse_ini_sections(config_text)
+    missing: List[str] = []
+    for section, fields in REQUIRED_CONFIG_FIELDS.items():
+        body = sections.get(section, "")
+        for field in fields:
+            if not re.search(rf"^\s*{re.escape(field)}\s*=", body, re.MULTILINE):
+                missing.append(f"[{section}] {field}")
+    return missing
+
+
 def create_or_validate_config(config_path: str, obs_size: int, action_size: int, population_size: int) -> None:
     """
-    Write NEAT config from manifest (population parity). If file exists and pop_size differs, overwrite with manifest value.
-    Single source of truth: manifest population_size must match neat_config.txt pop_size.
+    Ensure neat_config.txt exists, is schema-compatible with the installed neat-python
+    version, and has pop_size driven by the Unreal manifest.
+
+    Decision logic (in order):
+    1. File missing           → CREATED from current template.
+    2. File has missing required fields (schema mismatch) → REGENERATED from template.
+    3. File schema-OK but wrong pop_size (parity mismatch) → REGENERATED from template.
+    4. File schema-OK and pop_size matches manifest → KEPT as-is.
+
+    "KEPT" is only printed when the pre-parse field check passes.
+    True schema validation (neat.Config() parse) happens in main() after this call.
     """
+    import re
+
     path = Path(config_path)
-    content = _config_template(obs_size, action_size, population_size)
-    if path.exists():
-        with open(path, "r") as f:
-            existing = f.read()
-        if f"pop_size              = {population_size}" not in existing and f"pop_size={population_size}" not in existing:
-            import re
-            match = re.search(r"pop_size\s*=\s*(\d+)", existing)
-            if match:
-                existing_pop = int(match.group(1))
-                if existing_pop != population_size:
-                    print(f"[NEAT] Population parity: overwriting neat_config.txt pop_size {existing_pop} -> {population_size} (manifest)")
-            else:
-                print(f"[NEAT] Population parity: writing neat_config.txt with pop_size={population_size} (manifest)")
-    else:
-        print(f"[NEAT] Creating neat_config.txt with pop_size={population_size} (manifest)")
-    with open(path, "w") as f:
-        f.write(content)
+    fresh_content = _config_template(obs_size, action_size, population_size)
+    print(f"[NEAT] Config path: {path}")
+
+    def _write_and_log(reason: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(fresh_content)
+        print(f"[NEAT] Config status: {reason}")
+        print(f"[NEAT] Config population parity: pop_size={population_size} (source: manifest)")
+
+    if not path.exists():
+        _write_and_log("CREATED (file did not exist)")
+        return
+
+    existing = path.read_text(encoding="utf-8")
+
+    missing = _find_missing_fields(existing)
+    if missing:
+        _write_and_log(f"REGENERATED (schema mismatch — missing fields: {missing})")
+        return
+
+    pop_match = re.search(r"^\s*pop_size\s*=\s*(\d+)", existing, re.MULTILINE)
+    existing_pop = int(pop_match.group(1)) if pop_match else None
+    if existing_pop != population_size:
+        _write_and_log(
+            f"REGENERATED (population parity: config pop_size={existing_pop} != manifest {population_size})"
+        )
+        return
+
+    print(f"[NEAT] Config status: KEPT (all required fields present, pop_size={population_size} matches manifest)")
     print(f"[NEAT] Config population parity: pop_size={population_size} (source: manifest)")
 
 
@@ -455,13 +553,36 @@ def main():
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / CONFIG_FILE
     create_or_validate_config(str(config_path), obs_size, action_size, population_size)
-    config = neat.Config(
-        neat.DefaultGenome,
-        neat.DefaultReproduction,
-        neat.DefaultSpeciesSet,
-        neat.DefaultStagnation,
-        str(config_path),
-    )
+    try:
+        config = neat.Config(
+            neat.DefaultGenome,
+            neat.DefaultReproduction,
+            neat.DefaultSpeciesSet,
+            neat.DefaultStagnation,
+            str(config_path),
+        )
+    except Exception as e:
+        error_text = str(e)
+        # Extract the missing field name from the neat-python error message when possible.
+        # neat-python raises: "Missing required configuration item in [Section]: 'field'"
+        import re as _re
+        neat_missing = _re.search(r"Missing required configuration item in \[(\w+)\][^']*'([^']+)'", error_text)
+        if neat_missing:
+            bad_section, bad_field = neat_missing.group(1), neat_missing.group(2)
+            hint = (
+                f"  Missing field '{bad_field}' in [{bad_section}] section of: {config_path}\n"
+                f"  Add '{bad_field} = <value>' to [{bad_section}], or delete '{config_path}' to force full regeneration.\n"
+                f"  Also add '{bad_section}.{bad_field}' to REQUIRED_CONFIG_FIELDS in train_neat.py to prevent future breakage."
+            )
+        else:
+            hint = (
+                f"  Config file used: {config_path}\n"
+                f"  Raw error: {error_text}\n"
+                f"  Delete '{config_path}' and re-run to force full regeneration from the current template."
+            )
+        print(f"ERROR: neat.Config() schema parse failed.\n{hint}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[NEAT] Config compatibility: OK (neat.Config loaded successfully from {config_path})")
 
     # Single canonical checkpoint path (contract checkpoint_dir + fixed filename)
     checkpoint_path = get_checkpoint_path(checkpoint_dir_path)
@@ -516,6 +637,15 @@ def main():
         sys.exit(1)
     print(f"[NEAT] Checkpoint used: {resolved_checkpoint} (last_exported_generation={last_exported})")
     print(f"[NEAT] Resumed generation: {last_exported} (will load fitness for this generation, then export {last_exported + 1})")
+
+    # Patch pop_size from manifest: checkpoint may have a stale pop_size embedded in its config
+    # object (neat-python pickles the entire Config, so changing the file does not update the in-memory
+    # object). If population.run() uses the stale pop_size it will crash in reproduction when the new
+    # pop_size requires more elites than the old population had individuals.
+    if config.pop_size != population_size:
+        print(f"[NEAT] Checkpoint pop_size={config.pop_size} differs from manifest pop_size={population_size}; patching in-memory config.")
+        config.pop_size = population_size
+        population.config.pop_size = population_size
 
     fitness_loader = FitnessLoader(fitness_dir)
     fitness_map = fitness_loader.load_for_generation(last_exported)

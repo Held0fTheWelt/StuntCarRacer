@@ -211,47 +211,194 @@ void UNeatTrainingEditorWidget::OnPIEWorldStarted(UWorld* PIEWorld)
 	}
 	SetWorkflowState(ENeatTrainingWorkflowState::WaitingForPIEWorld);
 	CachedPIEWorld = PIEWorld;
-	if (PIEWorld)
+	if (!PIEWorld)
 	{
-		SetWorkflowState(ENeatTrainingWorkflowState::WaitingForRuntimeAgents);
-		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] PIE hook entered; PIE world captured. Will poll runtime registry for self-registered agents (interval=%.1fs, max=%.0fs)."),
-			AgentDiscoveryIntervalSeconds, AgentDiscoveryMaxDurationSeconds);
+		UE_LOG(LogCarAIEditor, Warning, TEXT("[NeatTrainingEditorWidget] PIE started but world not resolved; staying in WaitingForPIEWorld."));
+		return;
+	}
 
-		// Use editor world timer so polling runs regardless of PIE world tick.
-		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (EditorWorld)
+	SetWorkflowState(ENeatTrainingWorkflowState::WaitingForRuntimeAgents);
+	UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] PIE hook entered; PIE world captured. Inspecting runtime registry immediately (no timer wait)."));
+
+	// Primary path: immediate registry snapshot and handoff in the same call stack.
+	const bool bHandedOff = TryHandoffRegistryAgents(PIEWorld, TEXT("OnPIEWorldStarted immediate snapshot"));
+	if (bHandedOff)
+	{
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Immediate registry handoff succeeded; manager registration and auto-start done."));
+		return;
+	}
+
+	// No agents yet: subscribe to registry delegate so we hand off when agents register later.
+	URacingAgentRegistrySubsystem* Registry = PIEWorld->GetSubsystem<URacingAgentRegistrySubsystem>();
+	if (Registry)
+	{
+		const int32 SnapshotCount = Registry->GetRegisteredCount();
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Immediate registry snapshot: count=%d. Subscribing to OnAgentRegistered for later handoff."), SnapshotCount);
+		if (!bRegistryDelegateBound)
 		{
-			AgentDiscoveryPollIndex = 0;
-			AgentDiscoveryStartTime = FPlatformTime::Seconds();
-			EditorWorld->GetTimerManager().SetTimer(
-				AgentDiscoveryTimerHandle,
-				this,
-				&UNeatTrainingEditorWidget::PollForRuntimeAgents,
-				AgentDiscoveryIntervalSeconds,
-				true
-			);
-		}
-		else
-		{
-			UE_LOG(LogCarAIEditor, Error, TEXT("[NeatTrainingEditorWidget] No editor world for discovery timer; cannot poll for agents."));
-			SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed);
-			LastStatusMessage = TEXT("ERROR: No editor world for agent discovery timer.");
+			Registry->OnAgentRegistered.AddDynamic(this, &UNeatTrainingEditorWidget::OnRegistryAgentRegistered);
+			bRegistryDelegateBound = true;
+			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] OnAgentRegistered delegate bound; handoff will run when agents register."));
 		}
 	}
 	else
 	{
-		UE_LOG(LogCarAIEditor, Warning, TEXT("[NeatTrainingEditorWidget] PIE started but world not resolved; staying in WaitingForPIEWorld."));
+		UE_LOG(LogCarAIEditor, Warning, TEXT("[NeatTrainingEditorWidget] Registry subsystem null in PIE world; cannot subscribe to delegate. Relying on fallback diagnostics only."));
+	}
+
+	// Fallback diagnostics only: periodic retry until timeout. Not the primary path.
+	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (EditorWorld)
+	{
+		AgentDiscoveryPollIndex = 0;
+		AgentDiscoveryStartTime = FPlatformTime::Seconds();
+		EditorWorld->GetTimerManager().SetTimer(
+			AgentDiscoveryTimerHandle,
+			this,
+			&UNeatTrainingEditorWidget::PollForRuntimeAgents,
+			AgentDiscoveryIntervalSeconds,
+			true
+		);
+		UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Fallback diagnostics timer armed (not primary path); will retry handoff periodically until timeout (%.0fs)."), AgentDiscoveryMaxDurationSeconds);
+	}
+	else
+	{
+		UE_LOG(LogCarAIEditor, Error, TEXT("[NeatTrainingEditorWidget] No editor world for fallback timer; cannot run diagnostics."));
+	}
+}
+
+void UNeatTrainingEditorWidget::ClearFallbackDiscoveryState()
+{
+	if (GEditor && GEditor->GetEditorWorldContext().World())
+	{
+		GEditor->GetEditorWorldContext().World()->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+	}
+	AgentDiscoveryTimerHandle.Invalidate();
+	if (bRegistryDelegateBound && CachedPIEWorld.IsValid() && IsValid(CachedPIEWorld.Get()))
+	{
+		if (URacingAgentRegistrySubsystem* Registry = CachedPIEWorld->GetSubsystem<URacingAgentRegistrySubsystem>())
+		{
+			Registry->OnAgentRegistered.RemoveDynamic(this, &UNeatTrainingEditorWidget::OnRegistryAgentRegistered);
+		}
+		bRegistryDelegateBound = false;
+	}
+}
+
+bool UNeatTrainingEditorWidget::TryHandoffRegistryAgents(UWorld* PIEWorld, const FString& Reason)
+{
+	if (!PIEWorld || !IsValid(PIEWorld))
+	{
+		return false;
+	}
+	if (!TrainingManager || !IsValid(TrainingManager))
+	{
+		UE_LOG(LogCarAIEditor, Verbose, TEXT("[NeatTrainingEditorWidget] TryHandoffRegistryAgents(%s): manager null or invalid; skipping."), *Reason);
+		return false;
+	}
+
+	URacingAgentRegistrySubsystem* Registry = PIEWorld->GetSubsystem<URacingAgentRegistrySubsystem>();
+	if (!Registry)
+	{
+		if (WorkflowLogVerbosity >= 2)
+		{
+			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] TryHandoffRegistryAgents(%s): registry subsystem null."), *Reason);
+		}
+		return false;
+	}
+
+	TArray<URacingAgentComponent*> Snapshot = Registry->GetRegisteredAgents();
+	const int32 DiscoveredCount = Snapshot.Num();
+
+	const bool bImmediate = Reason.Contains(TEXT("immediate"));
+	if (bImmediate)
+	{
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Immediate registry snapshot: count=%d"), DiscoveredCount);
+	}
+	else
+	{
+		UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Registry snapshot (%s): count=%d"), *Reason, DiscoveredCount);
+	}
+
+	if (DiscoveredCount == 0)
+	{
+		return false;
+	}
+
+	UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Handoff proceeding (%s); registering agents with manager."), *Reason);
+
+	int32 NewlyRegistered = 0;
+	int32 DuplicatesSkipped = 0;
+	int32 Rejected = 0;
+	for (URacingAgentComponent* Comp : Snapshot)
+	{
+		if (!Comp || !IsValid(Comp))
+		{
+			Rejected++;
+			continue;
+		}
+		if (TrainingManager->RegisterAgent(Comp))
+		{
+			NewlyRegistered++;
+		}
+		else
+		{
+			DuplicatesSkipped++;
+			if (WorkflowLogVerbosity >= 3)
+			{
+				UE_LOG(LogCarAIEditor, Verbose, TEXT("[NeatTrainingEditorWidget] Duplicate agent skipped (already in manager): %s"), Comp ? *Comp->GetPathName() : TEXT("null"));
+			}
+		}
+	}
+	RegisteredAgentCount = TrainingManager->GetRegisteredAgentCount();
+
+	UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Registration summary: discovered=%d newly_registered=%d duplicates=%d rejected=%d total_registered=%d"),
+		DiscoveredCount, NewlyRegistered, DuplicatesSkipped, Rejected, RegisteredAgentCount);
+
+	SetWorkflowState(ENeatTrainingWorkflowState::RegisteringAgents, TEXT("Handoff: registering with manager."));
+	SetWorkflowState(ENeatTrainingWorkflowState::AgentsRegistered, TEXT("Registration complete."));
+	SetWorkflowState(ENeatTrainingWorkflowState::ReadyToStart, TEXT("Evaluating readiness for auto-start."));
+
+	const bool bStarted = TryAutoStartTraining();
+	if (bStarted)
+	{
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Training auto-start triggered (reason=%s)."), *Reason);
+	}
+	else
+	{
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Readiness check did not pass; training not started. Reason: %s"), *Reason);
+	}
+
+	ClearFallbackDiscoveryState();
+	return true;
+}
+
+void UNeatTrainingEditorWidget::OnRegistryAgentRegistered(URacingAgentComponent* Agent)
+{
+	UWorld* World = CachedPIEWorld.Get();
+	if (!World || !IsValid(World))
+	{
+		return;
+	}
+	UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Registry delegate fired: OnAgentRegistered (agent=%s). Running handoff."),
+		Agent && IsValid(Agent) ? *Agent->GetPathName() : TEXT("null"));
+	const bool bHandedOff = TryHandoffRegistryAgents(World, TEXT("OnAgentRegistered delegate"));
+	if (bHandedOff)
+	{
+		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Delegate-driven handoff succeeded; manager registration and auto-start done."));
 	}
 }
 
 void UNeatTrainingEditorWidget::PollForRuntimeAgents()
 {
+	AgentDiscoveryPollIndex++;
+	UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: poll #%d (not primary path)."), AgentDiscoveryPollIndex);
+
 	UWorld* World = CachedPIEWorld.Get();
 	if (!World || !IsValid(World))
 	{
 		if (WorkflowLogVerbosity >= 2)
 		{
-			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Poll #%d: skipped — PIE world invalid or null."), AgentDiscoveryPollIndex);
+			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: poll #%d skipped — PIE world invalid or null."), AgentDiscoveryPollIndex);
 		}
 		return;
 	}
@@ -259,112 +406,50 @@ void UNeatTrainingEditorWidget::PollForRuntimeAgents()
 	{
 		if (WorkflowLogVerbosity >= 2)
 		{
-			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Poll #%d: skipped — manager null or invalid."), AgentDiscoveryPollIndex);
+			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: poll #%d skipped — manager null or invalid."), AgentDiscoveryPollIndex);
 		}
 		return;
 	}
 
 	const double Elapsed = FPlatformTime::Seconds() - AgentDiscoveryStartTime;
-	AgentDiscoveryPollIndex++;
 
-	// ——— Registry-driven discovery: canonical source is runtime registry (agents self-register in BeginPlay). ———
-	URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>();
-	if (!Registry)
-	{
-		if (WorkflowLogVerbosity >= 2)
-		{
-			UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Poll #%d | elapsed=%.1fs | state=%s | world=%s | registry=null (PIE world may not have subsystem yet)."),
-				AgentDiscoveryPollIndex, Elapsed, WorkflowStateToShortString(WorkflowState), *World->GetName());
-		}
-		return;
-	}
-
-	TArray<URacingAgentComponent*> FoundInWorld = Registry->GetRegisteredAgents();
-	const int32 DiscoveredCount = FoundInWorld.Num();
-
-	// Per-poll summary: registry count is the source of truth.
-	if (WorkflowLogVerbosity >= 2)
-	{
-		UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] Poll #%d | elapsed=%.1fs | state=%s | world=%s | registry_count=%d (registry-driven discovery)."),
-			AgentDiscoveryPollIndex, Elapsed, WorkflowStateToShortString(WorkflowState), *World->GetName(), DiscoveredCount);
-	}
-	if (AgentDiscoveryPollIndex == 1 && WorkflowLogVerbosity >= 1)
-	{
-		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] PIE world captured; runtime registry resolved. Polling registry for agent count (interval=%.1fs, max=%.0fs)."),
-			AgentDiscoveryIntervalSeconds, AgentDiscoveryMaxDurationSeconds);
-	}
-
-	// Timeout: fail with full diagnostics
+	// Timeout: clear fallback state and fail
 	if (Elapsed >= AgentDiscoveryMaxDurationSeconds)
 	{
-		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (EditorWorld)
+		UE_LOG(LogCarAIEditor, Error, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: timeout after %d polls (%.1fs). Clearing fallback timer and delegate."), AgentDiscoveryPollIndex, Elapsed);
+		ClearFallbackDiscoveryState();
+		int32 LastCount = 0;
+		if (URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>())
 		{
-			EditorWorld->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
+			LastCount = Registry->GetRegisteredCount();
 		}
-		AgentDiscoveryTimerHandle.Invalidate();
-		UE_LOG(LogCarAIEditor, Error, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery TIMEOUT (registry-driven). total_polls=%d elapsed=%.1fs last_registry_count=%d last_manager_registered=%d state=%s world=%s. Ensure GameFeature adds RacingAgentComponent so they self-register in BeginPlay."),
-			AgentDiscoveryPollIndex, Elapsed, DiscoveredCount, TrainingManager->GetRegisteredAgentCount(), WorkflowStateToShortString(WorkflowState), *World->GetName());
+		UE_LOG(LogCarAIEditor, Error, TEXT("[NeatTrainingEditorWidget] Runtime agent discovery TIMEOUT. total_polls=%d elapsed=%.1fs last_registry_count=%d. Ensure GameFeature adds RacingAgentComponent so they self-register in BeginPlay."),
+			AgentDiscoveryPollIndex, Elapsed, LastCount);
 		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed, TEXT("Discovery timeout; zero agents in runtime registry."));
 		LastStatusMessage = TEXT("Timeout: no agents in runtime registry. Ensure GameFeature adds RacingAgentComponent (they self-register in BeginPlay).");
 		return;
 	}
 
-	// Hard log if registry count stays zero (agents self-register in BeginPlay; if they exist, registry should see them).
-	if (DiscoveredCount == 0 && AgentDiscoveryPollIndex >= 10 && AgentDiscoveryPollIndex % 10 == 0)
-	{
-		UE_LOG(LogCarAIEditor, Warning, TEXT("[NeatTrainingEditorWidget] Still zero agents in registry after %d polls (%.1fs). RacingAgentComponent must call registry RegisterAgent in BeginPlay."), AgentDiscoveryPollIndex, Elapsed);
-	}
-
-	if (DiscoveredCount == 0)
+	// Single shared handoff path: TryHandoffRegistryAgents clears timer and unbind on success
+	FString Reason = FString::Printf(TEXT("fallback diagnostics poll #%d"), AgentDiscoveryPollIndex);
+	if (TryHandoffRegistryAgents(World, Reason))
 	{
 		return;
 	}
 
-	// Found agents: stop polling, register, then auto-start
-	UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-	if (EditorWorld)
+	if (WorkflowLogVerbosity >= 2)
 	{
-		EditorWorld->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
-	}
-	AgentDiscoveryTimerHandle.Invalidate();
-
-	UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Readiness passed: registry_count=%d. Auto-registration with manager triggered."), DiscoveredCount);
-	SetWorkflowState(ENeatTrainingWorkflowState::RegisteringAgents, TEXT("Discovered agents via registry; registering with manager."));
-
-	int32 NewlyRegistered = 0;
-	int32 AlreadyRegistered = 0;
-	int32 Rejected = 0;
-	for (URacingAgentComponent* Comp : FoundInWorld)
-	{
-		if (!Comp || !IsValid(Comp)) { Rejected++; continue; }
-		if (TrainingManager->RegisterAgent(Comp))
+		int32 RegistryCount = 0;
+		if (URacingAgentRegistrySubsystem* Registry = World->GetSubsystem<URacingAgentRegistrySubsystem>())
 		{
-			NewlyRegistered++;
+			RegistryCount = Registry->GetRegisteredCount();
 		}
-		else
-		{
-			AlreadyRegistered++;
-		}
+		UE_LOG(LogCarAIEditor, Log, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: poll #%d | elapsed=%.1fs | registry_count=%d (handoff will run when count>0)."),
+			AgentDiscoveryPollIndex, Elapsed, RegistryCount);
 	}
-	RegisteredAgentCount = TrainingManager->GetRegisteredAgentCount();
-
-	if (WorkflowLogVerbosity >= 1)
+	if (AgentDiscoveryPollIndex >= 10 && AgentDiscoveryPollIndex % 10 == 0)
 	{
-		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Registration summary: discovered=%d eligible=%d newly_registered=%d already_registered=%d rejected=%d total_registered=%d world=%s"),
-			DiscoveredCount, DiscoveredCount, NewlyRegistered, AlreadyRegistered, Rejected, RegisteredAgentCount, *World->GetName());
-	}
-
-	SetWorkflowState(ENeatTrainingWorkflowState::AgentsRegistered, TEXT("Registration complete."));
-	SetWorkflowState(ENeatTrainingWorkflowState::ReadyToStart, TEXT("Evaluating readiness for auto-start."));
-
-	if (TryAutoStartTraining())
-	{
-		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Training auto-start triggered after agent registration (agents=%d)."), RegisteredAgentCount);
-	}
-	else
-	{
-		UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] Readiness check did not pass; training not started. Register/start manually if needed."));
+		UE_LOG(LogCarAIEditor, Warning, TEXT("[NeatTrainingEditorWidget] FALLBACK DIAGNOSTICS: still zero agents in registry after %d polls (%.1fs). Primary path is OnAgentRegistered delegate."), AgentDiscoveryPollIndex, Elapsed);
 	}
 }
 
@@ -424,12 +509,7 @@ bool UNeatTrainingEditorWidget::TryAutoStartTraining()
 void UNeatTrainingEditorWidget::OnPIEEnded()
 {
 	UE_LOG(LogCarAIEditor, Display, TEXT("[NeatTrainingEditorWidget] PIE ended; deferred training request cancelled, clearing stale references."));
-	// Clear discovery timer so no more polls run.
-	if (GEditor && GEditor->GetEditorWorldContext().World())
-	{
-		GEditor->GetEditorWorldContext().World()->GetTimerManager().ClearTimer(AgentDiscoveryTimerHandle);
-	}
-	AgentDiscoveryTimerHandle.Invalidate();
+	ClearFallbackDiscoveryState();
 	CachedPIEWorld.Reset();
 	if (TrainingManager && IsValid(TrainingManager))
 	{

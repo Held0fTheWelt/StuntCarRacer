@@ -51,7 +51,10 @@ bool UNEATGenomeImporter::LoadFromFile(const FString& FilePath, FNEATGenome& Out
 
 	OutGenome.GenomeID = Root->GetIntegerField(TEXT("genome_id"));
 	OutGenome.Generation = Root->GetIntegerField(TEXT("generation"));
-	OutGenome.Fitness = Root->HasField(TEXT("fitness")) ? Root->GetNumberField(TEXT("fitness")) : 0.f;
+	{
+		const TSharedPtr<FJsonValue> FitnessField = Root->TryGetField(TEXT("fitness"));
+		OutGenome.Fitness = (FitnessField && FitnessField->Type != EJson::Null) ? (float)FitnessField->AsNumber() : 0.f;
+	}
 	OutGenome.NumInputs = Root->GetIntegerField(TEXT("num_inputs"));
 	OutGenome.NumOutputs = Root->GetIntegerField(TEXT("num_outputs"));
 
@@ -168,25 +171,25 @@ bool UNEATGenomeImporter::ValidateGenome(FNEATGenome& InOutGenome)
 		NodeIds.Add(N.NodeId);
 	}
 
-	// Input node count and IDs 0..NumInputs-1
+	// NEAT convention: input node IDs -1..-NumInputs (observation[i] -> node -(i+1))
 	for (int32 i = 0; i < ExpectedInputs; ++i)
 	{
-		if (!NodeIds.Contains(i))
+		const int32 InputNodeId = -(i + 1);
+		if (!NodeIds.Contains(InputNodeId))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing input node %d (expected 0..%d)"),
-				InOutGenome.GenomeID, i, ExpectedInputs - 1);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing input node %d (expected -1..-%d)"),
+				InOutGenome.GenomeID, InputNodeId, ExpectedInputs);
 			return false;
 		}
 	}
 
-	// Output node count and IDs NumInputs..NumInputs+NumOutputs-1
+	// NEAT convention: output node IDs 0..NumOutputs-1
 	for (int32 i = 0; i < ExpectedOutputs; ++i)
 	{
-		const int32 OutId = ExpectedInputs + i;
-		if (!NodeIds.Contains(OutId))
+		if (!NodeIds.Contains(i))
 		{
-			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing output node %d (expected %d..%d)"),
-				InOutGenome.GenomeID, OutId, ExpectedInputs, ExpectedInputs + ExpectedOutputs - 1);
+			UE_LOG(LogTemp, Error, TEXT("[NEATGenomeImporter] VALIDATION FAIL: Genome %d: missing output node %d (expected 0..%d)"),
+				InOutGenome.GenomeID, i, ExpectedOutputs - 1);
 			return false;
 		}
 	}

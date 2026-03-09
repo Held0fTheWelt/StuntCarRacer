@@ -127,7 +127,7 @@ struct FRacingObservation
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float RayForwardDown = 1.f;
 
-	/** Ground distance ray (straight down) - gap detection */
+	/** Ground ray (straight down): 1 = grounded/safe, 0 = no ground or far/danger. Used for gap/offtrack and airborne checks. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	float RayGroundDist = 1.f;
 
@@ -347,6 +347,26 @@ struct FRacingRewardConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "General")
 	int32 MaxEpisodeSteps = 5000;
+
+	// ===== Post-Reset Grace (stabilization) =====
+
+	/** Seconds after reset during which collision and offtrack terminations are ignored (avoids immediate death from reset artifacts). Use 2.0–3.0s for diagnostics. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stabilization|Grace")
+	float GraceSecondsAfterReset = 2.5f;
+
+	// ===== NEAT Termination Fitness Penalties (stabilization) =====
+
+	/** Fitness penalty applied when episode ends with Collision (so bad terminations are not rewarded). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stabilization|NEAT Penalties")
+	float NEATTerminationPenaltyCollision = 20.f;
+
+	/** Fitness penalty applied when episode ends with Fell off track (so offtrack is not rewarded). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stabilization|NEAT Penalties")
+	float NEATTerminationPenaltyFellOffTrack = 20.f;
+
+	/** Minimum NEAT fitness after applying termination penalties (prevents misleadingly large positive fitness). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stabilization|NEAT Penalties")
+	float NEATTerminationFitnessMin = -50.f;
 };
 
 // ============================================================================

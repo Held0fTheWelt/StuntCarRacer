@@ -181,16 +181,16 @@ bool UNEATGraphEvaluator::Evaluate(const TArray<float>& Observation, TArray<floa
 
 	ValueMap.Empty();
 
-	// Set input node values (NEAT convention: input nodes 0..NumInputs-1)
+	// NEAT convention: observation[i] -> input node ID -(i+1)
 	for (int32 i = 0; i < ExpectedInputCount; ++i)
 	{
-		ValueMap.Add(i, Observation[i]);
+		ValueMap.Add(-(i + 1), Observation[i]);
 	}
 
-	// Feed-forward: evaluate non-input nodes in topological order
+	// Feed-forward: evaluate non-input nodes (input nodes have negative IDs)
 	for (const FNEATCompiledNode& Comp : CompiledNodes)
 	{
-		if (Comp.NodeId < ExpectedInputCount) continue;
+		if (Comp.NodeId < 0) continue;
 		float Sum = 0.f;
 		for (const FNEATCompiledInput& Inp : Comp.Inputs)
 		{
@@ -202,16 +202,15 @@ bool UNEATGraphEvaluator::Evaluate(const TArray<float>& Observation, TArray<floa
 		ValueMap.Add(Comp.NodeId, Y);
 	}
 
-	// Read 3 outputs (node ids NumInputs, NumInputs+1, NumInputs+2); fail if any output node missing (disconnected)
-	const int32 OutBase = ExpectedInputCount;
-	OutActions.SetNum(3);
-	for (int32 k = 0; k < 3; ++k)
+	// NEAT convention: output node IDs 0..NumOutputs-1 (steer, throttle, brake)
+	OutActions.SetNum(ExpectedOutputCount);
+	for (int32 k = 0; k < ExpectedOutputCount; ++k)
 	{
-		const float* V = ValueMap.Find(OutBase + k);
+		const float* V = ValueMap.Find(k);
 		if (!V)
 		{
 			UE_LOG(LogTemp, Error, TEXT("[NEATGraphEvaluator] Inference failed: output node %d (index %d) not computed; graph may have disconnected output"),
-				OutBase + k, k);
+				k, k);
 			return false;
 		}
 		OutActions[k] = *V;

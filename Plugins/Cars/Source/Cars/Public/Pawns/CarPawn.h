@@ -83,4 +83,8 @@ public:
 	{
 		return ChaosVehicleMovement;
 	}
+
+	virtual AActor* GetCarActor_Implementation() const override { return const_cast<ACarPawn*>(this); }
+
+	virtual UPrimitiveComponent* GetCarRootPrimitive_Implementation() const override;
 };

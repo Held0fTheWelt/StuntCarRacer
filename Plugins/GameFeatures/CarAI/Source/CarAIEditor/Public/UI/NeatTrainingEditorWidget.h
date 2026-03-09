@@ -200,26 +200,43 @@ private:
 	/** Return PIE world if active, otherwise the editor world. Used for agent discovery. */
 	UWorld* GetEditorOrPIEWorld() const;
 
-	/** Poll for URacingAgentComponent in CachedPIEWorld; register when found or fail after max duration. Called by discovery timer. */
+	/**
+	 * Shared registry-to-manager handoff: get runtime registry snapshot, register agents with manager (idempotent),
+	 * run readiness, trigger auto-start. Used by OnPIEWorldStarted (immediate), OnAgentRegistered delegate, and fallback diagnostics.
+	 * @return true if handoff succeeded (agents registered and/or training started).
+	 */
+	bool TryHandoffRegistryAgents(UWorld* PIEWorld, const FString& Reason);
+
+	/** Callback for registry OnAgentRegistered delegate when immediate snapshot had zero agents. */
+	UFUNCTION()
+	void OnRegistryAgentRegistered(URacingAgentComponent* Agent);
+
+	/** Fallback diagnostics only: periodic retry of TryHandoffRegistryAgents until success or timeout. Not the primary path. */
 	void PollForRuntimeAgents();
 
 	/** Run readiness gate (manager, agents, Python). If pass, start training automatically. Returns true if training was started. */
 	bool TryAutoStartTraining();
 
+	/** Clear fallback timer and unbind registry delegate. Called on handoff success, PIE end, and timeout. */
+	void ClearFallbackDiscoveryState();
+
 private:
 	/** Cached PIE world when armed flow is waiting for agents. Cleared on PIE end. */
 	TWeakObjectPtr<UWorld> CachedPIEWorld;
 
-	/** Timer for deferred runtime-agent discovery. Uses editor world timer manager. */
+	/** Fallback diagnostics only: timer for periodic handoff retry. Not the primary path. */
 	FTimerHandle AgentDiscoveryTimerHandle;
-	/** When discovery started (seconds, FPlatformTime::Seconds()). Used to enforce max wait. */
+	/** When fallback discovery started (seconds, FPlatformTime::Seconds()). Used to enforce max wait. */
 	double AgentDiscoveryStartTime = 0.0;
 
 	static constexpr float AgentDiscoveryIntervalSeconds = 0.5f;
 	static constexpr float AgentDiscoveryMaxDurationSeconds = 30.0f;
 
-	/** Poll index since discovery started; incremented each PollForRuntimeAgents tick. Used for structured logs. */
+	/** Poll index for fallback diagnostics; incremented each PollForRuntimeAgents tick. */
 	int32 AgentDiscoveryPollIndex = 0;
+
+	/** True when OnAgentRegistered is bound to the PIE-world registry; used to unbind on handoff success, timeout, or PIE end. */
+	bool bRegistryDelegateBound = false;
 
 	/** Verbosity for workflow/poll logs: 0=Error/Warning only, 1=+Display (transitions), 2=+Log (per-poll), 3=+Verbose (per-component skip). */
 	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "0", ClampMax = "3"))

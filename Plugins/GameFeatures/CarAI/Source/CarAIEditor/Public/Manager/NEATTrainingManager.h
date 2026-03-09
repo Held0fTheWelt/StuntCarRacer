@@ -245,6 +245,12 @@ protected:
 	/** Tick function for evaluating episodes */
 	void TickEvaluation(float DeltaTime);
 
+	/**
+	 * Fires 0.5s after the last RegisterAgent() when bPendingGenomesReady is true.
+	 * Starts the episode evaluation for the cross-PIE pending generation.
+	 */
+	void OnPendingResumeTimer();
+
 	/** Episode completed callback */
 	UFUNCTION()
 	void OnAgentEpisodeDone(const FEpisodeStats& Stats);
@@ -269,6 +275,17 @@ private:
 
 	/** When true, training was stopped/cancelled; late OnPythonEvolutionComplete callbacks are ignored to avoid crash (e.g. divide-by-zero when Agents.Num()==0). Cleared on StartTraining(). */
 	UPROPERTY() bool bStopRequested = false;
+
+	/**
+	 * True when Python has produced new genomes but no agents were registered at completion time
+	 * (e.g. PIE ended before Python finished). The next RegisterAgent() call will arm a short
+	 * debounce timer; when the timer fires, evaluation resumes automatically.
+	 * Cleared on StartTraining(), StopTraining(), or when the debounce timer triggers.
+	 */
+	UPROPERTY() bool bPendingGenomesReady = false;
+
+	/** Debounce timer used for cross-PIE genome resume (fires 0.5s after the last RegisterAgent). */
+	UPROPERTY() FTimerHandle PendingResumeTimer;
 
 	/** Batch mode: index into CurrentGenomes for the start of the current batch */
 	UPROPERTY() int32 CurrentBatchStartIndex = 0;

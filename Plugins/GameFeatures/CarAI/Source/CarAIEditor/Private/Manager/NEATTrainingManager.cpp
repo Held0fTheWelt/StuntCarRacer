@@ -30,6 +30,11 @@ void UNEATTrainingManager::StartTraining()
 	}
 
 	bStopRequested = false;
+	bPendingGenomesReady = false;
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(PendingResumeTimer);
+	}
 
 	if (Agents.Num() == 0)
 	{
@@ -85,12 +90,14 @@ void UNEATTrainingManager::StopTraining()
 	}
 
 	bStopRequested = true;
+	bPendingGenomesReady = false;
 	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Stop requested; any late Python completion callback will be ignored."));
 
-	// Stop evaluation timer
+	// Stop evaluation timer and pending-resume timer
 	if (GetWorld())
 	{
 		GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
+		GetWorld()->GetTimerManager().ClearTimer(PendingResumeTimer);
 	}
 
 	// Stop Python if running
@@ -162,6 +169,23 @@ bool UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
 	Agent->MarkRegistered();
 
 	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Agent registered (RuntimeState=Registered; awaiting genome assignment and authorization). Total registered: %d"), Agents.Num());
+
+	// Cross-PIE resume: Python already produced genomes for this generation but PIE had ended.
+	// Arm a short debounce timer so all agents can register before evaluation starts.
+	if (bPendingGenomesReady && !bStopRequested)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(PendingResumeTimer);
+			World->GetTimerManager().SetTimer(
+				PendingResumeTimer,
+				FTimerDelegate::CreateUObject(this, &UNEATTrainingManager::OnPendingResumeTimer),
+				0.5f,
+				false);
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Cross-PIE resume armed: genomes ready for generation %d; debounce timer set (0.5s, %d agents so far)."), CurrentGeneration, Agents.Num());
+		}
+	}
+
 	return true;
 }
 
@@ -562,12 +586,37 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 
 	EvaluationTimeElapsed += DeltaTime;
 
+	// -----------------------------------------------------------------------
+	// PIE-ended detection: agents are gone (UnregisterAllAgents cleared them).
+	// AreAllAgentsDone() returns true with no agents because no agent objects
+	// it. We must detect this early so we do not mistake it for a legitimate
+	// all-done signal — the fitness map will be incomplete in this case.
+	// -----------------------------------------------------------------------
+	const bool bPIEEnded = (Agents.Num() == 0);
+
 	// Check if all agents in current batch are done
 	if (AreAllAgentsDone())
 	{
 		if (GetWorld())
 		{
 			GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
+		}
+
+		// ----- PIE ended mid-evaluation -----
+		// Agents were unregistered (PIE stop). If the generation is not fully
+		// evaluated, preserve the current generation's genomes so the next PIE
+		// session can re-run it from scratch. If it happens to be fully
+		// evaluated (all episodes finished before PIE ended), fall through and
+		// proceed normally — export + Python will handle the cross-PIE case.
+		if (bPIEEnded && !IsGenerationFullyEvaluated())
+		{
+			bPendingGenomesReady = true;
+			CurrentBatchStartIndex = 0;
+			GenomeFitnessMap.Empty();
+			UE_LOG(LogCarAITraining, Display,
+				TEXT("[NEATTrainingManager] PIE ended mid-evaluation: generation %d preserved (%d genomes). Will re-run automatically when next PIE session registers agents."),
+				CurrentGeneration, CurrentGenomes.Num());
+			return;
 		}
 
 		const bool bGenerationComplete = (CurrentBatchStartIndex + NumAgentsInCurrentBatch >= CurrentGenomes.Num());
@@ -577,6 +626,9 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			LogGenerationEvaluationProgress(TEXT("batch_done"));
 			if (!IsGenerationFullyEvaluated())
 			{
+				// Should not reach here: the bPIEEnded branch above handles the
+				// incomplete case. This path only fires if evaluation logic
+				// produced a mismatch — treat as a hard error.
 				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Generation %d: fitness map has %d entries but %d genomes; missing genome IDs. No genome may be silently skipped. Aborting export and stopping training."),
 					CurrentGeneration, GenomeFitnessMap.Num(), CurrentGenomes.Num());
 				StopTraining();
@@ -606,6 +658,19 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		}
 		else
 		{
+			// Batch not complete — more genomes remain.
+			if (bPIEEnded)
+			{
+				// PIE ended between batches: re-run the whole generation next PIE.
+				bPendingGenomesReady = true;
+				CurrentBatchStartIndex = 0;
+				GenomeFitnessMap.Empty();
+				UE_LOG(LogCarAITraining, Display,
+					TEXT("[NEATTrainingManager] PIE ended between batches: generation %d preserved (%d genomes). Will re-run in next PIE session."),
+					CurrentGeneration, CurrentGenomes.Num());
+				return;
+			}
+
 			CurrentBatchStartIndex += NumAgentsInCurrentBatch;
 			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Batch complete; starting next batch: genome index from %d of %d"), CurrentBatchStartIndex, CurrentGenomes.Num());
 			AssignGenomesToAgents();
@@ -631,6 +696,18 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 		if (GetWorld())
 		{
 			GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
+		}
+
+		// PIE ended during timeout window — re-run the generation.
+		if (bPIEEnded)
+		{
+			bPendingGenomesReady = true;
+			CurrentBatchStartIndex = 0;
+			GenomeFitnessMap.Empty();
+			UE_LOG(LogCarAITraining, Display,
+				TEXT("[NEATTrainingManager] PIE ended (timeout path): generation %d preserved (%d genomes). Will re-run in next PIE session."),
+				CurrentGeneration, CurrentGenomes.Num());
+			return;
 		}
 
 		const bool bGenerationComplete = (CurrentBatchStartIndex + NumAgentsInCurrentBatch >= CurrentGenomes.Num());
@@ -672,6 +749,44 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			StartEpisodeEvaluation();
 		}
 	}
+}
+
+void UNEATTrainingManager::OnPendingResumeTimer()
+{
+	if (!bPendingGenomesReady)
+	{
+		return;
+	}
+	if (bStopRequested)
+	{
+		bPendingGenomesReady = false;
+		return;
+	}
+	if (Agents.Num() <= 0)
+	{
+		UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Cross-PIE resume timer fired but still no agents registered; staying pending."));
+		return;
+	}
+
+	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Cross-PIE resume: %d agents registered, %d genomes ready for generation %d. Starting evaluation."),
+		Agents.Num(), CurrentGenomes.Num(), CurrentGeneration);
+
+	bPendingGenomesReady = false;
+	CurrentBatchStartIndex = 0;
+	GenomeFitnessMap.Empty();
+
+	// Stagger spawn distances for the newly registered agents (same logic as normal training start).
+	for (int32 i = 0; i < Agents.Num(); ++i)
+	{
+		if (URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr)
+		{
+			Agent->SpawnDistanceAlongTrackCm = i * AgentSpawnStaggerCm;
+		}
+	}
+
+	AssignGenomesToAgents();
+	TrainingState = ENEATTrainingState::Evaluating;
+	StartEpisodeEvaluation();
 }
 
 bool UNEATTrainingManager::AreAllAgentsDone() const
@@ -920,11 +1035,9 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 
 	bWaitingForPython = false;
 
-	if (Agents.Num() <= 0)
-	{
-		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Zero-agent guard: OnPythonEvolutionComplete called with no registered agents (Agents.Num()=%d). Aborting to avoid divide-by-zero; ignoring this completion."), Agents.Num());
-		return;
-	}
+	// Note: Agents.Num() may be 0 here if PIE ended before Python finished. We continue
+	// loading genomes so they are ready for the next PIE session (cross-PIE resume path).
+	// The divide-by-zero guard further below handles the no-agent case after genome load.
 
 	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution completion callback accepted (generation=%d, agents=%d)."), CurrentGeneration, Agents.Num());
 
@@ -991,10 +1104,13 @@ void UNEATTrainingManager::OnPythonEvolutionComplete(bool bSuccess)
 	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Python evolution complete: generation=%d, %d genomes loaded, %d agents registered"),
 		CurrentGeneration, CurrentGenomes.Num(), Agents.Num());
 
-	// Hard guard: no batch computation when agent count is zero (prevents divide-by-zero).
+	// No agents registered (PIE ended before Python finished): store genomes and defer evaluation.
+	// The next RegisterAgent() call will arm a 0.5s debounce timer → OnPendingResumeTimer().
 	if (Agents.Num() <= 0)
 	{
-		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Zero-agent guard: cannot compute batch count (Agents.Num()=%d). Aborting gracefully."), Agents.Num());
+		bPendingGenomesReady = true;
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Cross-PIE pending: %d genomes loaded for generation %d; no agents registered. Evaluation will start automatically when agents register in the next PIE session."),
+			CurrentGenomes.Num(), CurrentGeneration);
 		return;
 	}
 

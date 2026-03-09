@@ -583,6 +583,25 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Step %d (GenomeID=%d)"), *GetAgentLogId(), EpisodeStepCount, GenomeID);
 	}
 
+	// MVP-02: Startup diagnostics for first 5 frames (captures initial vehicle state)
+	if (EpisodeStepCount <= 5)
+	{
+		UChaosWheeledVehicleMovementComponent* MovComp = Vehicle ? Vehicle->FindComponentByClass<UChaosWheeledVehicleMovementComponent>() : nullptr;
+		const float ElapsedSecs = (FDateTime::Now() - EpisodeStartTime).GetTotalSeconds();
+		const FVector ActorLoc = Vehicle ? Vehicle->GetActorLocation() : FVector::Zero();
+		const FVector ActorVel = Vehicle ? Vehicle->GetVelocity() : FVector::Zero();
+		const float ForwardSpeed = ActorVel.X; // Assuming vehicle X is forward
+		const int32 WheelsOnGround = MovComp ? MovComp->GetNumWheelsOnGround() : -1;
+		const int32 TotalWheels = MovComp ? MovComp->GetNumWheels() : -1;
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STARTUP DIAG [frame=%d t=%.2fs]: loc=(%.0f,%.0f,%.0f) vel_forward=%.1f gear=%s throttle_pending stagger=%dcm grace_remain=%.2fs diag_remain=%.2fs wheels=%d/%d stuck_timer=%.2f grounded_frames=%d"),
+			*GetAgentLogId(), EpisodeStepCount, ElapsedSecs, ActorLoc.X, ActorLoc.Y, ActorLoc.Z, ForwardSpeed,
+			MovComp ? *FString::FromInt((int32)MovComp->GetCurrentGear()) : TEXT("?"),
+			(int32)SpawnDistanceAlongTrackCm,
+			FMath::Max(0.f, EpisodeGraceTimeRemaining),
+			FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum),
+			WheelsOnGround, TotalWheels, StuckTimeAccum, GroundedFrameCount);
+	}
+
 	// 1. Build Observation
 	FRacingObservation Obs = BuildObservation();
 	LastObservation = Obs;
@@ -1319,19 +1338,39 @@ bool URacingAgentComponent::CheckTerminalConditions(const FRacingObservation& Ob
 		if (Obs.SpeedNorm < RewardCfg.StuckSpeedNorm)
 		{
 			StuckTimeAccum += DeltaTime;
+			// MVP-02: Log Stuck threshold accumulation for first frames to understand timing
+			if (EpisodeStepCount <= 10)
+			{
+				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK CHECK [frame=%d t=%.2f]: SpeedNorm=%.3f (threshold=%.3f) StuckAccum=%.2f/%.2f grace_remain=%.2f diag_remain=%.2f"),
+					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Obs.SpeedNorm, RewardCfg.StuckSpeedNorm, StuckTimeAccum, RewardCfg.StuckTimeSeconds,
+					EpisodeGraceTimeRemaining, FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum));
+			}
 			if (StuckTimeAccum >= RewardCfg.StuckTimeSeconds)
 			{
 				OutReason = TEXT("Stuck");
+				UE_LOG(LogCarAIAgent, Error, TEXT("[%s] STUCK TRIGGERED [frame=%d t=%.2f]: accumulator=%.2f exceeded threshold=%.2f speed=%.3f"),
+					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, StuckTimeAccum, RewardCfg.StuckTimeSeconds, Obs.SpeedNorm);
 				return true;
 			}
 		}
 		else
 		{
+			if (EpisodeStepCount <= 10 && StuckTimeAccum > 0.f)
+			{
+				UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK RESET [frame=%d t=%.2f]: SpeedNorm=%.3f exceeded threshold=%.3f, resetting accumulator"),
+					*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Obs.SpeedNorm, RewardCfg.StuckSpeedNorm);
+			}
 			StuckTimeAccum = 0.f;
 		}
 	}
 	else
 	{
+		if (EpisodeStepCount <= 10 && StuckTimeAccum > 0.f)
+		{
+			UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STUCK SUPPRESSED [frame=%d t=%.2f]: grace_remain=%.2f diag_remain=%.2f, resetting accumulator"),
+				*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, EpisodeGraceTimeRemaining,
+				FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum));
+		}
 		StuckTimeAccum = 0.f; // Reset during suppressed window so it starts fresh after grace.
 	}
 
@@ -1396,6 +1435,13 @@ void URacingAgentComponent::ApplyAction(const FVehicleAction& Action)
 	if (!Car)
 	{
 		return;
+	}
+
+	// MVP-02: Log action application for first frames to diagnose vehicle control
+	if (EpisodeStepCount <= 10 && (Action.Throttle > 0.1f || Action.Steer != 0.f || Action.Brake > 0.1f))
+	{
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] ACTION APPLIED [frame=%d t=%.2f]: Steer=%.2f Throttle=%.2f Brake=%.2f"),
+			*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, Action.Steer, Action.Throttle, Action.Brake);
 	}
 
 	// Prefer CarInterface so controller-owned agents apply to the correct car.
@@ -1545,7 +1591,7 @@ bool URacingAgentComponent::ValidateCarSetupForEvaluation(FString* OutFailureRea
 	}
 
 	const FString RootClass = RootComp ? RootComp->GetClass()->GetName() : TEXT("null");
-	UE_LOG(LogCarAIAgent, Display, TEXT("[%s] Car setup valid for evaluation: owner=%s CarInterface_path=%s resolved_car=%s (%s) root_primitive=%s movement_component=%s"),
+	UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Car setup valid for evaluation: owner=%s CarInterface_path=%s resolved_car=%s (%s) root_primitive=%s movement_component=%s"),
 		*GetAgentLogId(), *OwnerClass, bCarResolvedViaInterface ? TEXT("yes") : TEXT("no"), *CarName, *CarClass,
 		*RootClass, MovementComp ? TEXT("present") : TEXT("missing"));
 	return true;

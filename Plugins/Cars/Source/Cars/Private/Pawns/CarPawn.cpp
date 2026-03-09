@@ -5,6 +5,7 @@
 
 #include "ChaosWheeledVehicleMovementComponent.h"
 
+#include "Components/PrimitiveComponent.h"
 #include "Components/InputComponent.h"
 #include "InputActionValue.h"
 #include "Interfaces/ControlComponentInterface.h"
@@ -242,5 +243,10 @@ bool ACarPawn::IsAirborne_Implementation() const
 		}
 	}
 	return true;
+}
+
+UPrimitiveComponent* ACarPawn::GetCarRootPrimitive_Implementation() const
+{
+	return Cast<UPrimitiveComponent>(GetRootComponent());
 }
 
