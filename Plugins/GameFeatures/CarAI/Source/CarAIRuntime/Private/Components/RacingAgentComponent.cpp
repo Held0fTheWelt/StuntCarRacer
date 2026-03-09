@@ -586,20 +586,15 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 	// MVP-02: Startup diagnostics for first 5 frames (captures initial vehicle state)
 	if (EpisodeStepCount <= 5)
 	{
-		UChaosWheeledVehicleMovementComponent* MovComp = Vehicle ? Vehicle->FindComponentByClass<UChaosWheeledVehicleMovementComponent>() : nullptr;
-		const float ElapsedSecs = (FDateTime::Now() - EpisodeStartTime).GetTotalSeconds();
 		const FVector ActorLoc = Vehicle ? Vehicle->GetActorLocation() : FVector::Zero();
 		const FVector ActorVel = Vehicle ? Vehicle->GetVelocity() : FVector::Zero();
-		const float ForwardSpeed = ActorVel.X; // Assuming vehicle X is forward
-		const int32 WheelsOnGround = MovComp ? MovComp->GetNumWheelsOnGround() : -1;
-		const int32 TotalWheels = MovComp ? MovComp->GetNumWheels() : -1;
-		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STARTUP DIAG [frame=%d t=%.2fs]: loc=(%.0f,%.0f,%.0f) vel_forward=%.1f gear=%s throttle_pending stagger=%dcm grace_remain=%.2fs diag_remain=%.2fs wheels=%d/%d stuck_timer=%.2f grounded_frames=%d"),
-			*GetAgentLogId(), EpisodeStepCount, ElapsedSecs, ActorLoc.X, ActorLoc.Y, ActorLoc.Z, ForwardSpeed,
-			MovComp ? *FString::FromInt((int32)MovComp->GetCurrentGear()) : TEXT("?"),
+		const float ForwardSpeed = ActorVel.X; // Assuming vehicle X is forward in local frame
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] STARTUP DIAG [frame=%d t=%.2fs]: loc=(%.0f,%.0f,%.0f) vel_forward=%.1f stagger=%dcm grace_remain=%.2fs diag_remain=%.2fs stuck_timer=%.2f grounded_frames=%d"),
+			*GetAgentLogId(), EpisodeStepCount, EpisodeTimeAccum, ActorLoc.X, ActorLoc.Y, ActorLoc.Z, ForwardSpeed,
 			(int32)SpawnDistanceAlongTrackCm,
 			FMath::Max(0.f, EpisodeGraceTimeRemaining),
 			FMath::Max(0.f, ForcedForwardDiagnosticDuration - EpisodeTimeAccum),
-			WheelsOnGround, TotalWheels, StuckTimeAccum, GroundedFrameCount);
+			StuckTimeAccum, GroundedFrameCount);
 	}
 
 	// 1. Build Observation
