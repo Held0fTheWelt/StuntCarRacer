@@ -542,6 +542,19 @@ void URacingAgentComponent::StepOnce(float DeltaTime)
 		return;
 	}
 
+	// MVP-03 fix: cap DeltaTime to 50ms (20fps minimum) to prevent large startup frames
+	// (caused by Python subprocess CPU contention) from burning through grace/FF protection
+	// windows in just 6 steps. At 3fps each frame was 333ms → FF+grace windows exhausted
+	// in 14 steps total. With this cap, worst case is 50ms/frame → windows span at least
+	// 40 and 50 frames respectively regardless of system load.
+	static constexpr float MaxAgentDeltaTime = 0.050f;
+	if (DeltaTime > MaxAgentDeltaTime)
+	{
+		UE_LOG(LogCarAIAgent, Warning, TEXT("[%s] StepOnce: clamping DeltaTime %.3f -> %.3f (large frame, possible subprocess CPU contention)"),
+			*GetAgentLogId(), DeltaTime, MaxAgentDeltaTime);
+		DeltaTime = MaxAgentDeltaTime;
+	}
+
 	FString FailureReason;
 	if (!ValidateCarSetupForEvaluation(&FailureReason))
 	{
