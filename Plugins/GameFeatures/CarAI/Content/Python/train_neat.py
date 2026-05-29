@@ -46,6 +46,7 @@ NEAT_OBSERVATION_LAYOUT = (
     "RayForward,RayLeft,RayRight,RayLeft45,RayRight45,RayForwardUp,RayForwardDown,RayGroundDist,"
     "GravityX,GravityY,GravityZ"
 )
+MIN_TRAINING_POPULATION_SIZE = 3
 
 # ============================================================================
 # NEAT Config Template
@@ -260,6 +261,29 @@ class FitnessLoader:
         print(f"[NEAT] Loaded {len(fitness_map)} fitness values")
         return fitness_map
 
+
+def validate_fitness_map_for_population(
+    fitness_map: Dict[int, float],
+    population_genome_ids,
+    generation: int,
+) -> None:
+    """Raise ValueError if Unreal's fitness file does not exactly match the evaluated population."""
+    expected_ids = {int(gid) for gid in population_genome_ids}
+    actual_ids = {int(gid) for gid in fitness_map.keys()}
+    missing = sorted(expected_ids - actual_ids)
+    extra = sorted(actual_ids - expected_ids)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing genome IDs: {missing}")
+        if extra:
+            details.append(f"unexpected genome IDs: {extra}")
+        raise ValueError(
+            f"Fitness file for generation {generation} does not match checkpoint population "
+            f"(expected {len(expected_ids)} IDs, got {len(actual_ids)}): " + "; ".join(details)
+        )
+
+
 # ============================================================================
 # Genome Exporter
 # ============================================================================
@@ -411,6 +435,21 @@ def load_contract(manifest_path: str) -> dict:
         print(
             f"ERROR: Observation size mismatch: contract observation_size={obs}, NEAT path requires {NEAT_OBSERVATION_SIZE}. "
             "Unreal and Python must agree; optional sensors (e.g. LIDAR) are not supported in the NEAT contract.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    action_size = int(data["action_size"])
+    if action_size != 3:
+        print(
+            f"ERROR: Action size mismatch: contract action_size={action_size}, NEAT path requires 3 (steer, throttle, brake).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    population_size = int(data["population_size"])
+    if population_size < MIN_TRAINING_POPULATION_SIZE:
+        print(
+            f"ERROR: population_size={population_size} is too small for NEAT training. "
+            f"Minimum is {MIN_TRAINING_POPULATION_SIZE}; use one Unreal agent with a population >= {MIN_TRAINING_POPULATION_SIZE} for sequential batch evaluation.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -654,10 +693,16 @@ def main():
         print(f"ERROR: Missing fitness export for generation {last_exported}. Expected: {fitness_file}", file=sys.stderr)
         print("[NEAT] Cannot resume without fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
         sys.exit(1)
+    try:
+        validate_fitness_map_for_population(fitness_map, population.population.keys(), last_exported)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        print("[NEAT] Cannot resume with mismatched fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
+        sys.exit(1)
     print(f"[NEAT] Fitness loaded: generation={last_exported}, {len(fitness_map)} genomes")
 
     for genome_id, genome in population.population.items():
-        genome.fitness = fitness_map.get(genome_id, 0.0)
+        genome.fitness = fitness_map[genome_id]
 
     # Capture best genome from pre-reproduction population (before population.run() modifies it)
     best_id = max(population.population.keys(), key=lambda gid: population.population[gid].fitness)
@@ -667,7 +712,7 @@ def main():
 
     def eval_only_assign(genomes, cfg):
         for gid, g in genomes:
-            g.fitness = fitness_map.get(gid, 0.0)
+            g.fitness = fitness_map[gid]
 
     population.run(eval_only_assign, 1)
     next_gen = last_exported + 1

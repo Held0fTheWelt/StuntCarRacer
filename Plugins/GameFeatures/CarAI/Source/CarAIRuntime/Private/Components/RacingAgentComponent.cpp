@@ -1682,12 +1682,15 @@ bool URacingAgentComponent::HasNEATPolicyBackend() const
 void URacingAgentComponent::ForceEpisodeDone()
 {
 	bEpisodeDone = true;
+	ApplyAction(FVehicleAction{ 0.f, 0.f, 0.f });
 	PolicyBackend = nullptr;
 	// Revoke authorization so this agent cannot start a new episode until re-authorized.
 	if (RuntimeState == EAgentRuntimeState::EvaluationAuthorized || RuntimeState == EAgentRuntimeState::Evaluating)
 	{
 		RuntimeState = EAgentRuntimeState::Registered;
 	}
+	Deactivate();
+	SetComponentTickEnabled(false);
 	UE_LOG(LogCarAIAgent, Verbose, TEXT("[%s] Agent deactivated for batch isolation (GenomeID=%d). RuntimeState=Registered. Authorization revoked."), *GetAgentLogId(), GenomeID);
 }
 

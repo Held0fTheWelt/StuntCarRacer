@@ -17,6 +17,8 @@
 #include "Serialization/JsonWriter.h"
 #include "Dom/JsonObject.h"
 
+static constexpr int32 MinNEATTrainingPopulationSize = 3;
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
@@ -39,6 +41,13 @@ void UNEATTrainingManager::StartTraining()
 	if (Agents.Num() == 0)
 	{
 		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] No agents registered!"));
+		return;
+	}
+
+	if (PopulationSize < MinNEATTrainingPopulationSize)
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] PopulationSize=%d is too small for NEAT training. Minimum is %d because elitism keeps 2 genomes unchanged; use one registered car with PopulationSize >= %d for sequential batch evaluation."),
+			PopulationSize, MinNEATTrainingPopulationSize, MinNEATTrainingPopulationSize);
 		return;
 	}
 
@@ -459,6 +468,11 @@ void UNEATTrainingManager::AssignGenomesToAgents()
 
 		const int32 GenomeIndex = CurrentBatchStartIndex + i;
 		const FNEATGenome& Genome = CurrentGenomes[GenomeIndex];
+
+		// The same physical agent may evaluate many genomes across batches. Put it
+		// back into Registered state before assigning the next genome/backend.
+		Agent->ForceEpisodeDone();
+
 		Agent->GenomeID = Genome.GenomeID;
 		Agent->Generation = CurrentGeneration;
 
@@ -545,20 +559,38 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 	}
 	if (BadCount > 0)
 	{
-		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Aborting StartEpisodeEvaluation: %d active batch agent(s) failed readiness gate."), BadCount);
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] Aborting StartEpisodeEvaluation: %d active batch agent(s) failed readiness gate. Stopping training."), BadCount);
+		StopTraining();
 		return;
 	}
 
 	// Initialize authorized agents. Initialize() transitions state to Evaluating and enables ticking.
 	int32 InitializedCount = 0;
+	int32 InitFailCount = 0;
 	for (int32 i = 0; i < NumAgentsInCurrentBatch; ++i)
 	{
 		URacingAgentComponent* Agent = Agents.IsValidIndex(i) ? Agents[i].Get() : nullptr;
 		if (Agent && Agent->IsEvaluationAuthorized())
 		{
 			Agent->Initialize();
-			InitializedCount++;
+			if (Agent->GetRuntimeState() == EAgentRuntimeState::Evaluating && !Agent->IsDone())
+			{
+				InitializedCount++;
+			}
+			else
+			{
+				InitFailCount++;
+				UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: agent %d failed to enter Evaluating state after Initialize() (RuntimeState=%d IsDone=%d GenomeID=%d)."),
+					i, (int32)Agent->GetRuntimeState(), Agent->IsDone() ? 1 : 0, Agent->GenomeID);
+			}
 		}
+	}
+	if (InitFailCount > 0 || InitializedCount != NumAgentsInCurrentBatch)
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] StartEpisodeEvaluation aborted: initialized=%d expected=%d failed=%d. Stopping training to avoid silent non-evaluation."),
+			InitializedCount, NumAgentsInCurrentBatch, InitFailCount);
+		StopTraining();
+		return;
 	}
 	UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] StartEpisodeEvaluation: %d agent(s) initialized and now evaluating (Gen=%d, batch_start=%d, batch_size=%d)."),
 		InitializedCount, CurrentGeneration, CurrentBatchStartIndex, NumAgentsInCurrentBatch);
@@ -689,7 +721,27 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 				FEpisodeStats Stats = Agent->GetEpisodeStats();
 				Stats.TerminationReason = TEXT("Timeout");
 				Stats.CalculateNEATFitness();
-				GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
+				if (GenomeFitnessMap.Contains(Agent->GenomeID))
+				{
+					const float ExistingFitness = GenomeFitnessMap.FindRef(Agent->GenomeID);
+					UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Timeout duplicate ignored: genome_id=%d already has fitness %.2f"),
+						Agent->GenomeID, ExistingFitness);
+				}
+				else
+				{
+					GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
+					UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Timeout fitness attributed: genome_id=%d fitness=%.2f"),
+						Agent->GenomeID, Stats.NEATFitness);
+					if (Stats.NEATFitness > TrainingStats.BestFitness)
+					{
+						TrainingStats.BestFitness = Stats.NEATFitness;
+						TrainingStats.BestGenomeID = Agent->GenomeID;
+						OnNewBestGenome.Broadcast(Agent->GenomeID, Stats.NEATFitness);
+						UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] New best genome: genome_id=%d fitness=%.2f"), Agent->GenomeID, Stats.NEATFitness);
+					}
+					TrainingStats.TotalEvaluations++;
+				}
+				Agent->ForceEpisodeDone();
 			}
 		}
 
@@ -858,6 +910,15 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 		}
 
 		// Unambiguous match: this active-batch agent produced this episode result
+		if (GenomeFitnessMap.Contains(Agent->GenomeID))
+		{
+			const float ExistingFitness = GenomeFitnessMap.FindRef(Agent->GenomeID);
+			UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Duplicate episode-done ignored: agent_id=%d genome_id=%d already has fitness %.2f; new fitness %.2f termination=%s"),
+				Stats.AgentInstanceID, Agent->GenomeID, ExistingFitness, Stats.NEATFitness, *Stats.TerminationReason);
+			Agent->ForceEpisodeDone();
+			return;
+		}
+
 		GenomeFitnessMap.Add(Agent->GenomeID, Stats.NEATFitness);
 		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Fitness attributed: agent_id=%d genome_id=%d fitness=%.2f termination=%s"),
 			Stats.AgentInstanceID, Agent->GenomeID, Stats.NEATFitness, *Stats.TerminationReason);
@@ -871,6 +932,7 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 		}
 
 		TrainingStats.TotalEvaluations++;
+		Agent->ForceEpisodeDone();
 		return;
 	}
 

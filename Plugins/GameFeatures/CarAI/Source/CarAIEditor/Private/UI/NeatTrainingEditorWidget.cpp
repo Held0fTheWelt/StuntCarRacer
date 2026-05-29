@@ -501,6 +501,13 @@ bool UNeatTrainingEditorWidget::TryAutoStartTraining()
 	SetWorkflowState(ENeatTrainingWorkflowState::TrainingStarting, TEXT("Readiness passed; starting training."));
 	ApplyConfigToManager();
 	TrainingManager->StartTraining();
+	if (TrainingManager->GetTrainingState() == ENEATTrainingState::Idle)
+	{
+		bTrainingInProgress = false;
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed, TEXT("Training manager refused start; check Output Log."));
+		LastStatusMessage = TEXT("Training start failed. Check Output Log.");
+		return false;
+	}
 	bTrainingInProgress = true;
 	SetWorkflowState(ENeatTrainingWorkflowState::TrainingRunning);
 	return true;
@@ -609,6 +616,13 @@ void UNeatTrainingEditorWidget::StartTraining()
 		RegisteredAgentCount, NumGenerations, PopulationSize, MaxEpisodeDuration, *PythonExecutable);
 
 	TrainingManager->StartTraining();
+	if (TrainingManager->GetTrainingState() == ENEATTrainingState::Idle)
+	{
+		bTrainingInProgress = false;
+		SetWorkflowState(ENeatTrainingWorkflowState::TrainingFailed, TEXT("Training manager refused start; check Output Log."));
+		LastStatusMessage = TEXT("Training start failed. Check Output Log.");
+		return;
+	}
 
 	bTrainingInProgress = true;
 	SetWorkflowState(ENeatTrainingWorkflowState::TrainingRunning);

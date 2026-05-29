@@ -81,8 +81,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "NEAT Config")
 	int32 NumGenerations = 50;
 
-	/** Population size (must match neat_config.txt) */
-	UPROPERTY(EditAnywhere, Category = "NEAT Config")
+	/** Population size. Must be at least 3 because the default NEAT elitism keeps 2 genomes unchanged. */
+	UPROPERTY(EditAnywhere, Category = "NEAT Config", meta = (ClampMin = "3"))
 	int32 PopulationSize = 50;
 
 	/** Max episode duration (seconds) for each evaluation */
@@ -171,7 +171,7 @@ public:
 	int32 GetRegisteredAgentCount() const { return Agents.Num(); }
 
 	UFUNCTION(BlueprintCallable, Category = "NEAT Training")
-	bool IsTraining() const { return TrainingState == ENEATTrainingState::Evaluating; }
+	bool IsTraining() const { return TrainingState == ENEATTrainingState::Evaluating || TrainingState == ENEATTrainingState::WaitingForPython; }
 
 	/** Returns the resolved contract (absolute paths). Log at startup to verify. */
 	FNEATTrainingContract GetResolvedContract() const;

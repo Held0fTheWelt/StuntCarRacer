@@ -321,6 +321,22 @@ class TestLoadContract(unittest.TestCase):
                 train_neat.load_contract(str(manifest_path))
             self.assertEqual(cm.exception.code, 1)
 
+    def test_manifest_wrong_action_size_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            write_manifest(manifest_path, make_valid_contract(action_size=2))
+            with self.assertRaises(SystemExit) as cm:
+                train_neat.load_contract(str(manifest_path))
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_manifest_population_size_too_small_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            write_manifest(manifest_path, make_valid_contract(population_size=1))
+            with self.assertRaises(SystemExit) as cm:
+                train_neat.load_contract(str(manifest_path))
+            self.assertEqual(cm.exception.code, 1)
+
 
 # ---------------------------------------------------------------------------
 # FitnessLoader
@@ -353,6 +369,19 @@ class TestFitnessLoader(unittest.TestCase):
                 self.assertEqual(loader.load_latest_generation(), {})
             finally:
                 sys.stdout = old_stdout
+
+
+class TestFitnessMapValidation(unittest.TestCase):
+    def test_validation_accepts_exact_population_ids(self):
+        train_neat.validate_fitness_map_for_population({1: 10.0, 2: 5.0}, [1, 2], 0)
+
+    def test_validation_rejects_missing_ids(self):
+        with self.assertRaises(ValueError):
+            train_neat.validate_fitness_map_for_population({1: 10.0}, [1, 2], 0)
+
+    def test_validation_rejects_extra_ids(self):
+        with self.assertRaises(ValueError):
+            train_neat.validate_fitness_map_for_population({1: 10.0, 2: 5.0, 99: 1.0}, [1, 2], 0)
 
 
 # ---------------------------------------------------------------------------

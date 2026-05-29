@@ -69,8 +69,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NEAT Config")
 	FString PythonExecutable = TEXT("python");
 
-	/** Population size — must match the value in neat_config.txt. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NEAT Config", meta = (ClampMin = "1"))
+	/** Population size. Must be at least 3 because the default NEAT elitism keeps 2 genomes unchanged. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NEAT Config", meta = (ClampMin = "3"))
 	int32 PopulationSize = 50;
 
 	/** Total generations to train in this session. */
