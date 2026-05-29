@@ -205,6 +205,9 @@ protected:
 	/** True if all agents in the current batch have finished their episode */
 	bool AreAllAgentsDone() const;
 
+	/** Resolve the ticking world for training timers. Prefer the PIE world owned by registered runtime agents. */
+	UWorld* ResolveTimerWorld() const;
+
 	/** True when all genomes in this generation have been evaluated (ready to export). */
 	bool IsGenerationFullyEvaluated() const;
 

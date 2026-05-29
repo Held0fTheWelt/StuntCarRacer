@@ -179,14 +179,26 @@ void UPythonTrainingExecutor::ExecuteTrainingAsync(const FString& PythonScriptPa
 
 	FString BatchScriptPath = FPaths::Combine(LogDir, FString::Printf(TEXT("run_training_%s.bat"), *Timestamp));
 	FString ScriptDir = FPaths::GetPath(ScriptPath);
+	FString RequirementsPath = FPaths::Combine(ScriptDir, TEXT("requirements.txt"));
 	// Invocation: python <script> --manifest <manifest_path>
 	FString BatchScriptContent = FString::Printf(
 		TEXT("@echo off\n")
 		TEXT("cd /d \"%s\"\n")
+		TEXT("\"%s\" -c \"import neat\" >nul 2>nul\n")
+		TEXT("if errorlevel 1 (\n")
+		TEXT("  echo Missing Python package: neat-python > \"%s\"\n")
+		TEXT("  echo Install dependencies with: \"%s\" -m pip install -r \"%s\" >> \"%s\"\n")
+		TEXT("  exit /b 2\n")
+		TEXT(")\n")
 		TEXT("\"%s\" \"%s\" --manifest \"%s\" > \"%s\" 2>&1\n")
 		TEXT("set EXIT_CODE=%%ERRORLEVEL%%\n")
 		TEXT("exit /b %%EXIT_CODE%%\n"),
 		*ScriptDir,
+		*PythonExe,
+		*PythonLogFilePath,
+		*PythonExe,
+		*RequirementsPath,
+		*PythonLogFilePath,
 		*PythonExe,
 		*ScriptPath,
 		*ManifestPath,

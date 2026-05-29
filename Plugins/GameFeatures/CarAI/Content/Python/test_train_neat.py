@@ -10,6 +10,7 @@ Or:
 """
 
 import io
+import itertools
 import json
 import pickle
 import sys
@@ -286,6 +287,16 @@ class TestCheckpointPaths(unittest.TestCase):
             ck.write_text("dummy")
             self.assertEqual(train_neat.find_checkpoint(Path(tmp)), ck)
 
+    def test_quarantine_checkpoint_renames_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ck = Path(tmp) / train_neat.CHECKPOINT_FILENAME
+            ck.write_bytes(b"stale checkpoint")
+            quarantined = train_neat.quarantine_checkpoint(ck)
+            self.assertFalse(ck.exists())
+            self.assertTrue(quarantined.exists())
+            self.assertIn("invalid_", quarantined.name)
+            self.assertEqual(quarantined.read_bytes(), b"stale checkpoint")
+
 
 # ---------------------------------------------------------------------------
 # Contract loading
@@ -408,6 +419,12 @@ class TestTrainingStatePath(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCheckpointSaveLoad(unittest.TestCase):
+    def test_itertools_count_pickle_reducer_preserves_position(self):
+        counter = itertools.count(10)
+        next(counter)
+        restored = pickle.loads(pickle.dumps(counter))
+        self.assertEqual(next(restored), 11)
+
     def test_save_and_load_checkpoint_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "neat_config.txt"
@@ -423,7 +440,7 @@ class TestCheckpointSaveLoad(unittest.TestCase):
             checkpoint_path = Path(tmp) / train_neat.CHECKPOINT_FILENAME
             train_neat.save_checkpoint(checkpoint_path, population, config, 0)
             self.assertTrue(checkpoint_path.exists())
-            pop2, config2, last = train_neat.load_checkpoint(checkpoint_path, 15, 3)
+            pop2, config2, last = train_neat.load_checkpoint(checkpoint_path, 15, 3, 4)
             self.assertEqual(last, 0)
             self.assertEqual(config2.genome_config.num_inputs, 15)
             self.assertEqual(config2.genome_config.num_outputs, 3)
@@ -435,7 +452,7 @@ class TestCheckpointSaveLoad(unittest.TestCase):
             with open(bad_path, "wb") as f:
                 pickle.dump((1, 2), f)  # only 2 items
             with self.assertRaises(ValueError):
-                train_neat.load_checkpoint(bad_path, 15, 3)
+                train_neat.load_checkpoint(bad_path, 15, 3, 4)
 
     def test_load_checkpoint_config_mismatch_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,7 +470,24 @@ class TestCheckpointSaveLoad(unittest.TestCase):
             checkpoint_path = Path(tmp) / train_neat.CHECKPOINT_FILENAME
             train_neat.save_checkpoint(checkpoint_path, population, config, 0)
             with self.assertRaises(ValueError):
-                train_neat.load_checkpoint(checkpoint_path, 15, 3)  # contract expects 15, 3
+                train_neat.load_checkpoint(checkpoint_path, 15, 3, 4)  # contract expects 15, 3
+
+    def test_load_checkpoint_population_mismatch_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "neat_config.txt"
+            config_path.write_text(train_neat._config_template(15, 3, 4))
+            config = neat.Config(
+                neat.DefaultGenome,
+                neat.DefaultReproduction,
+                neat.DefaultSpeciesSet,
+                neat.DefaultStagnation,
+                str(config_path),
+            )
+            population = neat.Population(config)
+            checkpoint_path = Path(tmp) / train_neat.CHECKPOINT_FILENAME
+            train_neat.save_checkpoint(checkpoint_path, population, config, 0)
+            with self.assertRaises(ValueError):
+                train_neat.load_checkpoint(checkpoint_path, 15, 3, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -683,11 +717,32 @@ class TestExportPopulationForUnreal(unittest.TestCase):
 class TestMainFreshStart(unittest.TestCase):
     """Run main() with a valid manifest and empty dirs to hit the fresh-start path."""
 
+    def _run_main_with_temp_script_dir(self, manifest_path: Path, script_dir: Path) -> None:
+        script_dir.mkdir(parents=True, exist_ok=True)
+        orig_argv = sys.argv
+        orig_stdout = sys.stdout
+        orig_stderr = sys.stderr
+        orig_file = train_neat.__file__
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        sys.argv = ["train_neat.py", "--manifest", str(manifest_path)]
+        train_neat.__file__ = str(script_dir / "train_neat.py")
+        try:
+            train_neat.main()
+        except SystemExit as e:
+            self.fail(f"main() exited with code {e.code}")
+        finally:
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+            sys.argv = orig_argv
+            train_neat.__file__ = orig_file
+
     def test_main_fresh_start_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
             fitness_dir = Path(tmp) / "fitness"
             genome_dir = Path(tmp) / "genome"
             checkpoint_dir = Path(tmp) / "checkpoint"
+            script_dir = Path(tmp) / "script"
             fitness_dir.mkdir()
             genome_dir.mkdir()
             checkpoint_dir.mkdir()
@@ -698,52 +753,75 @@ class TestMainFreshStart(unittest.TestCase):
                 checkpoint_dir=str(checkpoint_dir),
                 best_genome_path=str(Path(tmp) / "best_genome.json"),
             ))
-            # Run from a copy of script dir so config is written in tmp, not in Content/Python
-            config_in_tmp = Path(tmp) / "neat_config.txt"
-            # We need main() to use our manifest and have config written under tmp.
-            # train_neat.main() uses script_dir = Path(__file__).resolve().parent and
-            # config_path = script_dir / CONFIG_FILE, so it always writes to Content/Python.
-            # So we cannot redirect config to tmp without changing train_neat. Instead,
-            # run main and let it write config next to train_neat.py; we'll use a dedicated
-            # temp dir for fitness/genome/checkpoint and manifest. The config will be
-            # created in Content/Python - that's acceptable for one test.
-            # Alternatively: run the script as subprocess with env that points to a dir
-            # that contains both manifest and a writable neat_config.txt. So: create
-            # tmp, put manifest there, put a symlink or copy of train_neat? No.
-            # Simpler: just run main() and pass manifest. The only side effect in the
-            # repo is neat_config.txt in Content/Python - and we already have that file.
-            # So main() will do: load contract, create_or_validate_config(script_dir/config),
-            # neat.Config(script_dir/config), then create population, export to genome_dir (tmp),
-            # save checkpoint to checkpoint_dir (tmp), write_training_state to genome_dir.
-            # So the only thing that gets written outside tmp is the config file in
-            # script_dir. To avoid touching script_dir, we'd need to monkey-patch
-            # __file__ or the config path in train_neat. That's fragile.
-            # Better: run main and accept that config might be updated in script dir.
-            # Or run in subprocess and pass manifest; then the process will write
-            # config to its script dir (Content/Python). So we run:
-            #   python train_neat.py --manifest <tmp>/neat_contract.json
-            # That will write to tmp for genome/fitness/checkpoint and to Content/Python
-            # for config. So we don't need to change anything; we just run main().
-            orig_argv = sys.argv
-            sys.stdout = io.StringIO()
-            sys.stderr = io.StringIO()
-            sys.argv = ["train_neat.py", "--manifest", str(manifest_path)]
-            try:
-                train_neat.main()
-            except SystemExit as e:
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-                self.fail(f"main() exited with code {e.code}")
-            finally:
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-                sys.argv = orig_argv
+            self._run_main_with_temp_script_dir(manifest_path, script_dir)
             # Check outputs
             self.assertTrue((genome_dir / "generation_0_genomes.json").exists())
             self.assertTrue((checkpoint_dir / train_neat.CHECKPOINT_FILENAME).exists())
             self.assertTrue((genome_dir / train_neat.TRAINING_STATE_FILENAME).exists())
             state = json.loads((genome_dir / train_neat.TRAINING_STATE_FILENAME).read_text())
             self.assertEqual(state["exported_generation"], 0)
+
+    def test_main_quarantines_unloadable_checkpoint_and_starts_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fitness_dir = Path(tmp) / "fitness"
+            genome_dir = Path(tmp) / "genome"
+            checkpoint_dir = Path(tmp) / "checkpoint"
+            script_dir = Path(tmp) / "script"
+            fitness_dir.mkdir()
+            genome_dir.mkdir()
+            checkpoint_dir.mkdir()
+            stale_checkpoint = checkpoint_dir / train_neat.CHECKPOINT_FILENAME
+            stale_checkpoint.write_bytes(b"not a pickle")
+            manifest_path = Path(tmp) / "neat_contract.json"
+            write_manifest(manifest_path, make_valid_contract(
+                fitness_dir=str(fitness_dir),
+                genome_dir=str(genome_dir),
+                checkpoint_dir=str(checkpoint_dir),
+                best_genome_path=str(Path(tmp) / "best_genome.json"),
+                training_mode="resume",
+            ))
+            self._run_main_with_temp_script_dir(manifest_path, script_dir)
+            self.assertTrue((genome_dir / "generation_0_genomes.json").exists())
+            self.assertTrue(stale_checkpoint.exists(), "A new checkpoint should be written after fresh export")
+            quarantined = list(checkpoint_dir.glob("neat_checkpoint_latest.invalid_*.pkl"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_bytes(), b"not a pickle")
+
+    def test_main_reexports_checkpoint_when_fitness_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fitness_dir = Path(tmp) / "fitness"
+            genome_dir = Path(tmp) / "genome"
+            checkpoint_dir = Path(tmp) / "checkpoint"
+            script_dir = Path(tmp) / "script"
+            fitness_dir.mkdir()
+            genome_dir.mkdir()
+            checkpoint_dir.mkdir()
+            checkpoint_config_path = Path(tmp) / "checkpoint_config.txt"
+            checkpoint_config_path.write_text(train_neat._config_template(15, 3, 4))
+            config = neat.Config(
+                neat.DefaultGenome,
+                neat.DefaultReproduction,
+                neat.DefaultSpeciesSet,
+                neat.DefaultStagnation,
+                str(checkpoint_config_path),
+            )
+            population = neat.Population(config)
+            checkpoint_path = checkpoint_dir / train_neat.CHECKPOINT_FILENAME
+            train_neat.save_checkpoint(checkpoint_path, population, config, 0)
+            manifest_path = Path(tmp) / "neat_contract.json"
+            write_manifest(manifest_path, make_valid_contract(
+                fitness_dir=str(fitness_dir),
+                genome_dir=str(genome_dir),
+                checkpoint_dir=str(checkpoint_dir),
+                best_genome_path=str(Path(tmp) / "best_genome.json"),
+                population_size=4,
+                training_mode="resume",
+            ))
+            self._run_main_with_temp_script_dir(manifest_path, script_dir)
+            self.assertTrue((genome_dir / "generation_0_genomes.json").exists())
+            data = json.loads((genome_dir / "generation_0_genomes.json").read_text())
+            self.assertEqual(data["population_size"], 4)
+            self.assertEqual(len(data["genomes"]), 4)
 
 
 # ---------------------------------------------------------------------------

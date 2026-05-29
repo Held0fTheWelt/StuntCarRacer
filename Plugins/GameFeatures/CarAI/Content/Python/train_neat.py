@@ -24,6 +24,10 @@ Usage (from Unreal):
 """
 
 import argparse
+import ast
+import copyreg
+from datetime import datetime
+import itertools
 import json
 import sys
 import neat
@@ -47,6 +51,23 @@ NEAT_OBSERVATION_LAYOUT = (
     "GravityX,GravityY,GravityZ"
 )
 MIN_TRAINING_POPULATION_SIZE = 3
+
+
+def _reduce_itertools_count(counter: itertools.count) -> tuple:
+    """
+    Python 3.14 no longer pickles itertools.count by default, but neat-python
+    stores count objects in its reproduction/species state. Preserve the current
+    counter position so Population checkpoints remain portable.
+    """
+    repr_text = repr(counter)
+    if not repr_text.startswith("count(") or not repr_text.endswith(")"):
+        raise TypeError(f"Unsupported itertools.count repr: {repr_text}")
+    args_text = repr_text[len("count("):-1]
+    args = tuple(ast.literal_eval(part.strip()) for part in args_text.split(",") if part.strip())
+    return itertools.count, args
+
+
+copyreg.pickle(type(itertools.count()), _reduce_itertools_count)
 
 # ============================================================================
 # NEAT Config Template
@@ -170,6 +191,7 @@ def load_checkpoint(
     checkpoint_path: Path,
     expected_inputs: int,
     expected_outputs: int,
+    expected_population_size: int,
 ) -> Tuple[neat.Population, neat.Config, int]:
     """
     Load (population, config, last_exported_unreal_generation).
@@ -186,6 +208,12 @@ def load_checkpoint(
             f"Checkpoint config mismatch: checkpoint has num_inputs={config.genome_config.num_inputs} "
             f"num_outputs={config.genome_config.num_outputs}, contract expects {expected_inputs} / {expected_outputs}"
         )
+    population_count = len(population.population)
+    if population_count != expected_population_size:
+        raise ValueError(
+            f"Checkpoint population mismatch: checkpoint has {population_count} genomes, "
+            f"contract expects population_size={expected_population_size}"
+        )
     return population, config, last_exported
 
 
@@ -199,6 +227,55 @@ def save_checkpoint(
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     with open(checkpoint_path, "wb") as f:
         pickle.dump((population, config, last_exported_unreal_gen), f)
+
+
+def quarantine_checkpoint(checkpoint_path: Path) -> Path:
+    """Move an unusable checkpoint aside without deleting it, then return the new path."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = checkpoint_path.with_name(
+        f"{checkpoint_path.stem}.invalid_{timestamp}{checkpoint_path.suffix}"
+    )
+    counter = 1
+    while target.exists():
+        target = checkpoint_path.with_name(
+            f"{checkpoint_path.stem}.invalid_{timestamp}_{counter}{checkpoint_path.suffix}"
+        )
+        counter += 1
+    checkpoint_path.replace(target)
+    return target
+
+
+def export_initial_population_for_unreal(
+    config: neat.Config,
+    genome_dir_path: Path,
+    checkpoint_path: Path,
+) -> None:
+    """Create a fresh population, export generation 0, and save the matching checkpoint."""
+    population = neat.Population(config)
+    population.add_reporter(neat.StdOutReporter(True))
+    export_population_for_unreal(population, config, genome_dir_path, 0)
+    list_path_0 = genome_dir_path / "generation_0_genomes.json"
+    print(f"[NEAT] Exported generation file: {list_path_0} (generation 0 for Unreal to evaluate)")
+    print(f"[NEAT] Number of genomes exported: {len(population.population)}")
+    save_checkpoint(checkpoint_path, population, config, 0)
+    print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation=0)")
+    write_training_state(genome_dir_path, 0)
+
+
+def reexport_population_for_unreal(
+    population: neat.Population,
+    config: neat.Config,
+    genome_dir_path: Path,
+    generation: int,
+    reason: str,
+) -> None:
+    """Export an already-checkpointed generation again without evolving it."""
+    print(f"[NEAT] Re-exporting generation {generation}: {reason}")
+    export_population_for_unreal(population, config, genome_dir_path, generation)
+    list_path = genome_dir_path / f"generation_{generation}_genomes.json"
+    print(f"[NEAT] Re-exported generation file: {list_path} (generation {generation} for Unreal to evaluate)")
+    print(f"[NEAT] Number of genomes exported: {len(population.population)}")
+    write_training_state(genome_dir_path, generation)
 
 
 # ============================================================================
@@ -656,26 +733,34 @@ def main():
     if resolved_checkpoint is None:
         # Fresh start: no checkpoint exists; create initial population, export generation_0, save checkpoint
         print(f"[NEAT] Fresh start: no checkpoint at {checkpoint_path}")
-        population = neat.Population(config)
-        population.add_reporter(neat.StdOutReporter(True))
-        export_population_for_unreal(population, config, genome_dir_path, 0)
-        list_path_0 = genome_dir_path / "generation_0_genomes.json"
-        print(f"[NEAT] Exported generation file: {list_path_0} (generation 0 for Unreal to evaluate)")
-        print(f"[NEAT] Number of genomes exported: {len(population.population)}")
-        save_checkpoint(checkpoint_path, population, config, 0)
-        print(f"[NEAT] Checkpoint saved: {checkpoint_path} (last_exported_generation=0)")
-        write_training_state(genome_dir_path, 0)
+        export_initial_population_for_unreal(config, genome_dir_path, checkpoint_path)
         return
 
     # Resume: load checkpoint, load fitness for last_exported generation, run one reproduction, export next gen
     print(f"[NEAT] Resumed run: checkpoint found at {resolved_checkpoint}")
     try:
-        population, config, last_exported = load_checkpoint(resolved_checkpoint, obs_size, action_size)
-    except (ValueError, OSError) as e:
-        print(f"ERROR: Failed to load checkpoint: {e}", file=sys.stderr)
-        sys.exit(1)
+        population, config, last_exported = load_checkpoint(
+            resolved_checkpoint, obs_size, action_size, population_size
+        )
+    except Exception as e:
+        print(f"[NEAT] WARNING: Failed to load checkpoint: {e}", file=sys.stderr)
+        try:
+            quarantined_path = quarantine_checkpoint(resolved_checkpoint)
+        except OSError as move_error:
+            print(
+                f"ERROR: Failed to quarantine unusable checkpoint {resolved_checkpoint}: {move_error}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"[NEAT] Quarantined unusable checkpoint: {quarantined_path}", file=sys.stderr)
+        print("[NEAT] Starting fresh generation 0 because the checkpoint cannot be resumed.", file=sys.stderr)
+        export_initial_population_for_unreal(config, genome_dir_path, checkpoint_path)
+        return
     print(f"[NEAT] Checkpoint used: {resolved_checkpoint} (last_exported_generation={last_exported})")
-    print(f"[NEAT] Resumed generation: {last_exported} (will load fitness for this generation, then export {last_exported + 1})")
+    print(
+        f"[NEAT] Resumed generation: {last_exported} "
+        f"(will evolve to {last_exported + 1} only after matching fitness is available)"
+    )
 
     # Patch pop_size from manifest: checkpoint may have a stale pop_size embedded in its config
     # object (neat-python pickles the entire Config, so changing the file does not update the in-memory
@@ -690,15 +775,25 @@ def main():
     fitness_map = fitness_loader.load_for_generation(last_exported)
     fitness_file = Path(fitness_dir) / f"generation_{last_exported}.json"
     if not fitness_map:
-        print(f"ERROR: Missing fitness export for generation {last_exported}. Expected: {fitness_file}", file=sys.stderr)
-        print("[NEAT] Cannot resume without fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
-        sys.exit(1)
+        reexport_population_for_unreal(
+            population,
+            config,
+            genome_dir_path,
+            last_exported,
+            f"missing fitness export at {fitness_file}",
+        )
+        return
     try:
         validate_fitness_map_for_population(fitness_map, population.population.keys(), last_exported)
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        print("[NEAT] Cannot resume with mismatched fitness; aborting to avoid silent zero-fitness evolution.", file=sys.stderr)
-        sys.exit(1)
+        reexport_population_for_unreal(
+            population,
+            config,
+            genome_dir_path,
+            last_exported,
+            f"fitness export does not match checkpointed population ({e})",
+        )
+        return
     print(f"[NEAT] Fitness loaded: generation={last_exported}, {len(fitness_map)} genomes")
 
     for genome_id, genome in population.population.items():

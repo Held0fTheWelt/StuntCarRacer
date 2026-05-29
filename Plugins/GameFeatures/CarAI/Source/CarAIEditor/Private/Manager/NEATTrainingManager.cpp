@@ -33,9 +33,9 @@ void UNEATTrainingManager::StartTraining()
 
 	bStopRequested = false;
 	bPendingGenomesReady = false;
-	if (GetWorld())
+	if (UWorld* TimerWorld = ResolveTimerWorld())
 	{
-		GetWorld()->GetTimerManager().ClearTimer(PendingResumeTimer);
+		TimerWorld->GetTimerManager().ClearTimer(PendingResumeTimer);
 	}
 
 	if (Agents.Num() == 0)
@@ -103,10 +103,10 @@ void UNEATTrainingManager::StopTraining()
 	UE_LOG(LogCarAITraining, Warning, TEXT("[NEATTrainingManager] Stop requested; any late Python completion callback will be ignored."));
 
 	// Stop evaluation timer and pending-resume timer
-	if (GetWorld())
+	if (UWorld* TimerWorld = ResolveTimerWorld())
 	{
-		GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
-		GetWorld()->GetTimerManager().ClearTimer(PendingResumeTimer);
+		TimerWorld->GetTimerManager().ClearTimer(EvaluationTickTimer);
+		TimerWorld->GetTimerManager().ClearTimer(PendingResumeTimer);
 	}
 
 	// Stop Python if running
@@ -183,7 +183,7 @@ bool UNEATTrainingManager::RegisterAgent(URacingAgentComponent* Agent)
 	// Arm a short debounce timer so all agents can register before evaluation starts.
 	if (bPendingGenomesReady && !bStopRequested)
 	{
-		if (UWorld* World = GetWorld())
+		if (UWorld* World = ResolveTimerWorld())
 		{
 			World->GetTimerManager().ClearTimer(PendingResumeTimer);
 			World->GetTimerManager().SetTimer(
@@ -223,6 +223,12 @@ void UNEATTrainingManager::UnregisterAgent(URacingAgentComponent* Agent)
 
 void UNEATTrainingManager::UnregisterAllAgents()
 {
+	if (UWorld* TimerWorld = ResolveTimerWorld())
+	{
+		TimerWorld->GetTimerManager().ClearTimer(EvaluationTickTimer);
+		TimerWorld->GetTimerManager().ClearTimer(PendingResumeTimer);
+	}
+
 	for (TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
 	{
 		if (URacingAgentComponent* Agent = WeakAgent.Get())
@@ -598,14 +604,22 @@ void UNEATTrainingManager::StartEpisodeEvaluation()
 	// Start evaluation timer
 	EvaluationTimeElapsed = 0.f;
 
-	if (GetWorld())
+	if (UWorld* TimerWorld = ResolveTimerWorld())
 	{
-		GetWorld()->GetTimerManager().SetTimer(
+		TimerWorld->GetTimerManager().SetTimer(
 			EvaluationTickTimer,
 			FTimerDelegate::CreateUObject(this, &UNEATTrainingManager::TickEvaluation, 0.1f),
 			0.1f,
 			true
 		);
+		UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Evaluation timer armed on world '%s' (type=%d)."),
+			*TimerWorld->GetName(), (int32)TimerWorld->WorldType);
+	}
+	else
+	{
+		UE_LOG(LogCarAITraining, Error, TEXT("[NEATTrainingManager] StartEpisodeEvaluation failed: no valid timer world. Registered agents=%d. Stopping training to avoid a silent batch hang."),
+			Agents.Num());
+		StopTraining();
 	}
 }
 
@@ -629,9 +643,9 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 	// Check if all agents in current batch are done
 	if (AreAllAgentsDone())
 	{
-		if (GetWorld())
+		if (UWorld* TimerWorld = ResolveTimerWorld())
 		{
-			GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
+			TimerWorld->GetTimerManager().ClearTimer(EvaluationTickTimer);
 		}
 
 		// ----- PIE ended mid-evaluation -----
@@ -745,9 +759,9 @@ void UNEATTrainingManager::TickEvaluation(float DeltaTime)
 			}
 		}
 
-		if (GetWorld())
+		if (UWorld* TimerWorld = ResolveTimerWorld())
 		{
-			GetWorld()->GetTimerManager().ClearTimer(EvaluationTickTimer);
+			TimerWorld->GetTimerManager().ClearTimer(EvaluationTickTimer);
 		}
 
 		// PIE ended during timeout window — re-run the generation.
@@ -854,6 +868,22 @@ bool UNEATTrainingManager::AreAllAgentsDone() const
 	return true;
 }
 
+UWorld* UNEATTrainingManager::ResolveTimerWorld() const
+{
+	for (const TWeakObjectPtr<URacingAgentComponent>& WeakAgent : Agents)
+	{
+		if (const URacingAgentComponent* Agent = WeakAgent.Get())
+		{
+			if (UWorld* AgentWorld = Agent->GetWorld())
+			{
+				return AgentWorld;
+			}
+		}
+	}
+
+	return GetWorld();
+}
+
 bool UNEATTrainingManager::IsGenerationFullyEvaluated() const
 {
 	if (GenomeFitnessMap.Num() != CurrentGenomes.Num())
@@ -933,6 +963,11 @@ void UNEATTrainingManager::OnAgentEpisodeDone(const FEpisodeStats& Stats)
 
 		TrainingStats.TotalEvaluations++;
 		Agent->ForceEpisodeDone();
+		if (AreAllAgentsDone())
+		{
+			UE_LOG(LogCarAITraining, Display, TEXT("[NEATTrainingManager] Active batch completed by episode callback; processing next batch immediately."));
+			TickEvaluation(0.f);
+		}
 		return;
 	}
 

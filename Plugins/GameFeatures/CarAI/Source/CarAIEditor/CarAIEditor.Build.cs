@@ -32,7 +32,7 @@ public class CarAIEditor : ModuleRules
 				"Projects",
 				"Framework",
 				"Cars",
-				"JSON",
+				"Json",
 				"CarAIRuntime",
 				"ChaosVehicles",
 			});
